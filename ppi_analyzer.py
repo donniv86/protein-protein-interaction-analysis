@@ -116,38 +116,38 @@ class ComprehensivePPIAnalyzer:
         }
 
         # Schrodinger Amino Acid Color Scheme (based on 2D interaction diagram standards)
-        # Enhanced with water droplet-like gradient colors
+        # Enhanced with visible, contrasting colors for clear distinction
         self.amino_acid_colors = {
             # Hydrophobic (Non-polar) - Cool blues and grays
-            'ALA': '#E8F4FD',  # Light blue-white
-            'VAL': '#D1E9FC',  # Sky blue
-            'LEU': '#B3D9F2',  # Light blue
-            'ILE': '#95C9E8',  # Medium blue
-            'MET': '#77B9DE',  # Blue-gray
-            'PHE': '#59A9D4',  # Steel blue
-            'TRP': '#3B99CA',  # Darker blue
-            'PRO': '#1D89C0',  # Deep blue
+            'ALA': '#87CEEB',  # Sky blue
+            'VAL': '#4682B4',  # Steel blue
+            'LEU': '#1E90FF',  # Dodger blue
+            'ILE': '#0000CD',  # Medium blue
+            'MET': '#4169E1',  # Royal blue
+            'PHE': '#191970',  # Midnight blue
+            'TRP': '#000080',  # Navy blue
+            'PRO': '#483D8B',  # Dark slate blue
 
-            # Hydrophilic (Polar) - Soft pastels
-            'GLY': '#FFFFFF',  # Pure white
-            'SER': '#F0F8FF',  # Alice blue
-            'THR': '#E6F3FF',  # Light cyan
-            'CYS': '#DCE8FF',  # Lavender blue
-            'TYR': '#D2E3FF',  # Light steel blue
-            'ASN': '#C8DEFF',  # Powder blue
-            'GLN': '#BED9FF',  # Light sky blue
+            # Hydrophilic (Polar) - Soft greens and teals
+            'GLY': '#98FB98',  # Pale green
+            'SER': '#90EE90',  # Light green
+            'THR': '#32CD32',  # Lime green
+            'CYS': '#228B22',  # Forest green
+            'TYR': '#006400',  # Dark green
+            'ASN': '#20B2AA',  # Light sea green
+            'GLN': '#48D1CC',  # Medium turquoise
 
             # Charged (Acidic) - Warm reds and pinks
-            'ASP': '#FFE6E6',  # Light pink
-            'GLU': '#FFD6D6',  # Pink
+            'ASP': '#FFB6C1',  # Light pink
+            'GLU': '#FF69B4',  # Hot pink
 
-            # Charged (Basic) - Cool blues and purples
-            'LYS': '#E6F0FF',  # Light blue
-            'ARG': '#D6E6FF',  # Lavender
-            'HIS': '#CCE0FF',  # Light steel blue
+            # Charged (Basic) - Cool purples and blues
+            'LYS': '#9370DB',  # Medium purple
+            'ARG': '#8A2BE2',  # Blue violet
+            'HIS': '#4B0082',  # Indigo
 
             # Special cases
-            'UNK': '#F5F5F5',  # Light gray
+            'UNK': '#C0C0C0',  # Silver
         }
 
         print("🔬 Comprehensive PPI Analyzer Initialized")
@@ -983,7 +983,7 @@ class ComprehensivePPIAnalyzer:
             island_y = center[1] + irregular_radius * np.sin(island_theta)
             ax_main.plot(island_x, island_y, color='darkgreen', alpha=0.6, linewidth=2.5, linestyle='-')
 
-        # Draw labels with clean styling
+        # Draw labels with stroke/outline effect for visibility on any background
         font_size = min(14, max(8, 24 // len(G.nodes())))  # Slightly larger fonts
 
         # Create clean labels without background
@@ -995,6 +995,26 @@ class ComprehensivePPIAnalyzer:
             else:  # Single line label
                 enhanced_labels[node] = label
 
+        # Draw text stroke/outline effect using multiple thin white rings
+        # Create multiple offset positions for stroke effect
+        stroke_offsets = [
+            (0.003, 0), (0, 0.003), (-0.003, 0), (0, -0.003),  # Cardinal directions
+            (0.002, 0.002), (0.002, -0.002), (-0.002, 0.002), (-0.002, -0.002)  # Diagonals
+        ]
+
+        # Draw white stroke rings
+        for dx, dy in stroke_offsets:
+            stroke_pos = {node: (pos[node][0] + dx, pos[node][1] + dy) for node in pos}
+            nx.draw_networkx_labels(
+                G, stroke_pos,
+                labels=enhanced_labels,
+                font_size=font_size,
+                font_weight='bold',
+                font_color='white',
+                ax=ax_main
+            )
+
+        # Draw the main text on top
         nx.draw_networkx_labels(
             G, pos,
             labels=enhanced_labels,
