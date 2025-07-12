@@ -29,6 +29,7 @@ import matplotlib.patches as mpatches
 import matplotlib.patheffects as path_effects
 import networkx as nx
 from scipy.spatial import ConvexHull
+from matplotlib.patches import FancyArrowPatch
 
 # Schrodinger color schemes
 AMINO_ACID_COLORS = {
@@ -251,48 +252,53 @@ class PPIPlotter:
                 path_effects.Stroke(linewidth=3, foreground='white'),
                 path_effects.Normal()
             ])
-        # Draw edges by type
-        if legend_handles is None:
-            legend_handles = []
-        for interaction_type, style in INTERACTION_STYLES.items():
-            edges = edges_by_type.get(interaction_type, [])
-            if edges:
-                nx.draw_networkx_edges(
-                    G, pos, edgelist=edges, edge_color=style['color'], style=style['style'], width=style['width'], ax=ax
-                )
-                legend_handles.append(
-                    mlines.Line2D([], [], color=style['color'], linestyle=style['style'], linewidth=style['width'], label=style['label'])
-                )
-        # Custom edge label placement to avoid overlap (especially for bipartite/left-right layout)
-        if edge_labels:
-            # If left-right layout (two chain groups), offset labels for parallel edges
-            if len(set([x for x, y in pos.values()])) == 2:
-                # Group edges by (x1, x2) to find parallel edges
-                from collections import defaultdict
-                edge_groups = defaultdict(list)
-                for idx, (n1, n2) in enumerate(edge_labels.keys()):
-                    x1, y1 = pos[n1]
-                    x2, y2 = pos[n2]
-                    # Always order left to right
-                    if x1 > x2:
-                        n1, n2 = n2, n1
-                        x1, y1, x2, y2 = x2, y2, x1, y1
-                    edge_groups[(x1, x2)].append(((n1, n2), idx))
-                for group in edge_groups.values():
-                    n_edges = len(group)
-                    for i, ((n1, n2), idx) in enumerate(group):
-                        x1, y1 = pos[n1]
-                        x2, y2 = pos[n2]
-                        # Midpoint
-                        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-                        # Offset: spread labels vertically if multiple edges
-                        offset = (i - (n_edges - 1) / 2) * 0.08 if n_edges > 1 else 0
-                        label = edge_labels.get((n1, n2), edge_labels.get((n2, n1), ''))
-                        if label:
-                            ax.text(mx, my + offset, label, color='purple', fontsize=self.font_size+1, fontweight='bold', ha='center', va='center', bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'))
+        # Draw edges as curves (arcs) and place labels at arc midpoints
+        edge_count = {}
+        for n1, n2 in G.edges():
+            key = tuple(sorted([n1, n2]))
+            edge_count[key] = edge_count.get(key, 0) + 1
+        edge_parallel_idx = {}
+        for key in edge_count:
+            edge_parallel_idx[key] = 0
+        for idx, (n1, n2) in enumerate(G.edges()):
+            x1, y1 = pos[n1]
+            x2, y2 = pos[n2]
+            key = tuple(sorted([n1, n2]))
+            # Alternate curvature for parallel edges
+            n_parallel = edge_count[key]
+            parallel_idx = edge_parallel_idx[key]
+            edge_parallel_idx[key] += 1
+            # Curvature: alternate sign and increase with index
+            base_curvature = 0.3
+            if n_parallel == 1:
+                curvature = 0
             else:
-                # Default: use networkx for non-bipartite layouts
-                nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='purple', font_size=self.font_size+1, label_pos=0.5, ax=ax)
+                sign = (-1) ** parallel_idx
+                curvature = sign * base_curvature * (1 + parallel_idx // 2)
+            # Draw the curved edge
+            arrow = FancyArrowPatch((x1, y1), (x2, y2),
+                                   connectionstyle=f"arc3,rad={curvature}",
+                                   arrowstyle='-', color='gray', linewidth=2, zorder=1)
+            ax.add_patch(arrow)
+            # Find the label (occupancy)
+            label = edge_labels.get((n1, n2), edge_labels.get((n2, n1), ''))
+            if label:
+                # Place label at the curve's midpoint (approximate)
+                # Compute control point for the arc
+                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                dx, dy = x2 - x1, y2 - y1
+                norm = np.sqrt(dx**2 + dy**2)
+                if norm == 0:
+                    norm = 1
+                # Perpendicular offset for the arc
+                cx = mx - curvature * dy / norm
+                cy = my + curvature * dx / norm
+                # Place label at the midpoint of the arc
+                label_x = (x1 + x2 + 2 * cx) / 4
+                label_y = (y1 + y2 + 2 * cy) / 4
+                ax.text(label_x, label_y, label, color='purple', fontsize=self.font_size+1,
+                        fontweight='bold', ha='center', va='center',
+                        bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'))
         plt.title(title, fontsize=18, fontweight='bold')
         ax.set_aspect('equal')
         plt.axis('off')
