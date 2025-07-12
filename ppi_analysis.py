@@ -6,10 +6,21 @@ Combines analysis and plotting in a single, reproducible, developer-friendly mod
 """
 
 import argparse
-import logging
+import sys
+import os
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Any
+import logging
+
+try:
+    from schrodinger.utils import log as schrod_log
+    from schrodinger.job import jobcontrol
+    SCHRODINGER_AVAILABLE = True
+except ImportError:
+    SCHRODINGER_AVAILABLE = False
+    logging.basicConfig(format='[%(levelname)s] %(message)s', level=logging.INFO)
+
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -195,56 +206,47 @@ class PPIAnalyzer:
 class PPIPlotter:
     """
     Plot protein-protein interaction networks with uniform, professional style.
+    Ensures consistent node size, font size, and layout for all interaction types.
     """
     def __init__(self, logger):
         self.logger = logger
+        self.node_size = 2000  # Fixed node size for all plots (larger for clarity)
+        self.font_size = 12    # Fixed font size for all labels
+        self.layout_seed = 42  # Fixed seed for reproducible layouts
 
     def _draw_ppi_network(self, G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, title, group1_nodes=None, group2_nodes=None, legend_handles=None):
         import matplotlib.lines as mlines
-        plt.figure(figsize=(16, 12))
-        ax = plt.gca()
-        node_size = 2200
-        # Layout: left/right with vertical spread
-        if group1_nodes is None or group2_nodes is None:
-            # Default: split by unique chains
-            unique_chains = sorted(set(node_chain[n] for n in G.nodes()))
-            if len(unique_chains) > 1:
-                group1_chains = set([unique_chains[0]])
-                group2_chains = set(unique_chains[1:])
-            else:
-                group1_chains = set([unique_chains[0]])
-                group2_chains = set()
-            group1_nodes = [n for n in G.nodes() if node_chain[n] in group1_chains]
-            group2_nodes = [n for n in G.nodes() if node_chain[n] in group2_chains]
-        pos = {}
-        y_gap = 0.25
-        for i, node in enumerate(group1_nodes):
-            pos[node] = (-1, i * y_gap - (len(group1_nodes)-1)*y_gap/2)
-        for i, node in enumerate(group2_nodes):
-            pos[node] = (1, i * y_gap - (len(group2_nodes)-1)*y_gap/2)
-        # Draw group outlines (convex hull) for each group
-        for group_nodes, color in zip([group1_nodes, group2_nodes], [CHAIN_COLORS.get(node_chain[n], CHAIN_COLORS['default']) for n in [group1_nodes[0], group2_nodes[0]] if len(group1_nodes) > 0 and len(group2_nodes) > 0]):
-            if len(group_nodes) >= 3:
-                points = np.array([pos[n] for n in group_nodes])
-                if len(np.unique(points[:, 0])) > 1 and len(np.unique(points[:, 1])) > 1:
-                    hull = ConvexHull(points)
-                    hull_pts = points[hull.vertices]
-                    poly = mpatches.Polygon(hull_pts, closed=True, facecolor=color, alpha=0.15, edgecolor=color, linewidth=2, zorder=0)
-                    ax.add_patch(poly)
-        for node in G.nodes():
-            x, y = pos[node]
-            resname = node_resname[node]
-            fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
-            border_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
-            circ = mpatches.Circle((x, y), radius=(node_size/20000), facecolor=fill_color, edgecolor=border_color, linewidth=3, zorder=2)
-            ax.add_patch(circ)
-        for node in G.nodes():
-            x, y = pos[node]
-            chain = node_chain[node]
-            aa = node_resname[node]
-            num = node_resnum[node]
+        fig, ax = plt.subplots(figsize=(10, 8))
+        # Determine left-right layout for two chain groups
+        unique_chains = sorted(set(node_chain[n] for n in G.nodes()))
+        # Group nodes by chain
+        chain_to_nodes = {chain: [n for n in G.nodes() if node_chain[n] == chain] for chain in unique_chains}
+        # If exactly two chain groups, use left-right layout
+        if len(unique_chains) == 2:
+            group1, group2 = unique_chains[0], unique_chains[1]
+            group1_nodes = chain_to_nodes[group1]
+            group2_nodes = chain_to_nodes[group2]
+            y_gap1 = 2.0 / max(1, len(group1_nodes)-1) if len(group1_nodes) > 1 else 0
+            y_gap2 = 2.0 / max(1, len(group2_nodes)-1) if len(group2_nodes) > 1 else 0
+            pos = {}
+            for i, n in enumerate(group1_nodes):
+                pos[n] = (-1, 1 - i * y_gap1)
+            for i, n in enumerate(group2_nodes):
+                pos[n] = (1, 1 - i * y_gap2)
+        else:
+            # Fallback: spring layout
+            pos = nx.spring_layout(G, seed=self.layout_seed)
+        # Node color by amino acid
+        node_colors = [AMINO_ACID_COLORS.get(node_resname[n], AMINO_ACID_COLORS['UNK']) for n in G.nodes()]
+        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=self.node_size, ax=ax, edgecolors='black', linewidths=1.5)
+        # Draw node labels with fixed font size
+        for n in G.nodes():
+            x, y = pos[n]
+            chain = node_chain.get(n, '')
+            aa = node_resname.get(n, 'UNK')
+            num = node_resnum.get(n, '')
             label_text = f"{chain}\n{aa}\n{num}"
-            text = ax.text(x, y, label_text, fontsize=12, fontweight='bold', ha='center', va='center', color='black', zorder=4, linespacing=1.1)
+            text = ax.text(x, y, label_text, fontsize=self.font_size, fontweight='bold', ha='center', va='center', color='black', zorder=4, linespacing=1.1)
             text.set_path_effects([
                 path_effects.Stroke(linewidth=3, foreground='white'),
                 path_effects.Normal()
@@ -261,9 +263,38 @@ class PPIPlotter:
                 legend_handles.append(
                     mlines.Line2D([], [], color=style['color'], linestyle=style['style'], linewidth=style['width'], label=style['label'])
                 )
+        # Custom edge label placement to avoid overlap (especially for bipartite/left-right layout)
         if edge_labels:
-            nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='purple', font_size=13, label_pos=0.5, ax=ax)
+            # If left-right layout (two chain groups), offset labels for parallel edges
+            if len(set([x for x, y in pos.values()])) == 2:
+                # Group edges by (x1, x2) to find parallel edges
+                from collections import defaultdict
+                edge_groups = defaultdict(list)
+                for idx, (n1, n2) in enumerate(edge_labels.keys()):
+                    x1, y1 = pos[n1]
+                    x2, y2 = pos[n2]
+                    # Always order left to right
+                    if x1 > x2:
+                        n1, n2 = n2, n1
+                        x1, y1, x2, y2 = x2, y2, x1, y1
+                    edge_groups[(x1, x2)].append(((n1, n2), idx))
+                for group in edge_groups.values():
+                    n_edges = len(group)
+                    for i, ((n1, n2), idx) in enumerate(group):
+                        x1, y1 = pos[n1]
+                        x2, y2 = pos[n2]
+                        # Midpoint
+                        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+                        # Offset: spread labels vertically if multiple edges
+                        offset = (i - (n_edges - 1) / 2) * 0.08 if n_edges > 1 else 0
+                        label = edge_labels.get((n1, n2), edge_labels.get((n2, n1), ''))
+                        if label:
+                            ax.text(mx, my + offset, label, color='purple', fontsize=self.font_size+1, fontweight='bold', ha='center', va='center', bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'))
+            else:
+                # Default: use networkx for non-bipartite layouts
+                nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='purple', font_size=self.font_size+1, label_pos=0.5, ax=ax)
         plt.title(title, fontsize=18, fontweight='bold')
+        ax.set_aspect('equal')
         plt.axis('off')
         plt.tight_layout()
         if legend_handles:
@@ -361,12 +392,47 @@ class PPIPlotter:
         self._draw_ppi_network(G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, "Consolidated Protein-Protein Interaction Diagram", group1_nodes, group2_nodes, legend_handles)
 
 # --- CLI and Main ---
+def submit_job(args, host, jobname):
+    r"""
+    Submit this script as a Schrodinger job to the specified host (CLI/batch-safe).
+
+    :param args: Parsed CLI arguments
+    :type args: argparse.Namespace
+    :param host: Host string for job submission
+    :type host: str
+    :param jobname: Job name for submission
+    :type jobname: str
+    :return: Job object
+    :rtype: schrodinger.job.jobcontrol.Job
+    """
+    schrodinger_run = os.path.join(os.environ.get("SCHRODINGER", "/opt/schrodinger"), "run")
+    cmd = [
+        schrodinger_run, sys.executable, os.path.abspath(__file__),
+        "--cms", args.cms,
+        "--traj", args.traj,
+        "--occupancy-threshold", str(args.occupancy_threshold),
+        "--output-prefix", args.output_prefix,
+        "--max-frames", str(args.max_frames) if args.max_frames is not None else "0"
+    ]
+    if args.chain_groups:
+        cmd += ["--chain-groups"] + args.chain_groups
+    if args.debug:
+        cmd.append("--debug")
+    # Add host and jobname as command-line arguments
+    cmd += ["-HOST", host, "-JOBNAME", jobname]
+    job = jobcontrol.launch_job(cmd)
+    return job
+
+
 def main():
-    import sys
+    r"""
+    Main function for protein-protein PPI analysis and visualization (Schrödinger style).
+    Supports Schrodinger job control and robust logging.
+    Outputs all results, logs, and raw data to a dedicated output directory.
+    """
     from schrodinger.structure import StructureReader
     from schrodinger.application.desmond.packages import traj
-    logging.basicConfig(format='[%(levelname)s] %(message)s', level=logging.INFO)
-    logger = logging.getLogger("PPIAnalysis")
+    import json
     parser = argparse.ArgumentParser(description="Protein-protein PPI analysis and visualization (Schrödinger style)")
     parser.add_argument('--cms', required=True, type=str, help='Path to the Desmond .cms structure file')
     parser.add_argument('--traj', required=True, type=str, help='Path to the trajectory file or directory')
@@ -375,7 +441,36 @@ def main():
     parser.add_argument('--output-prefix', type=str, default='ppi_analysis', help='Prefix for output files (default: ppi_analysis)')
     parser.add_argument('--debug', action='store_true', help='Enable detailed debug/progress logging')
     parser.add_argument('--max-frames', type=int, default=None, help='Maximum number of trajectory frames to analyze (default: all)')
+    parser.add_argument('--submit-job', action='store_true', help='Submit this script as a Schrodinger job and exit')
+    parser.add_argument('--host', type=str, default='localhost', help='Host for job submission (default: localhost)')
+    parser.add_argument('--jobname', type=str, default='ppi_analysis', help='Job name for submission (default: ppi_analysis)')
     args = parser.parse_args()
+
+    # Create output directory
+    output_dir = Path(args.output_prefix)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup logger: Schrodinger logger + file handler
+    if SCHRODINGER_AVAILABLE:
+        logger = schrod_log.get_output_logger("PPIAnalysis")
+    else:
+        logger = logging.getLogger("PPIAnalysis")
+    log_file = output_dir / "ppi_analysis.log"
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
+
+    if args.submit_job:
+        if not SCHRODINGER_AVAILABLE:
+            print("❌ Schrodinger job control is not available in this environment.")
+            sys.exit(1)
+        logger.info(f"Submitting job to host: {args.host} with jobname: {args.jobname}")
+        job = submit_job(args, args.host, args.jobname)
+        logger.info(f"Job submitted: {job}")
+        print(f"Job submitted to host: {args.host} with jobname: {args.jobname}")
+        sys.exit(0)
+
     debug = args.debug
     cms_file = Path(args.cms)
     trajectory_file = Path(args.traj)
@@ -437,9 +532,16 @@ def main():
         for inter in persistent_interactions:
             logger.info(str(inter))
         logger.info(f"\n✅ Found {len(persistent_interactions)} consistent {interaction_type.replace('_', ' ')} interactions across {max_frames} frames.")
-        plotter.plot_network(persistent_interactions, output_file=f"{output_prefix}_network_{interaction_type}.png", title=f"{interaction_type.replace('_', ' ').title()} Network")
-    plotter.plot_consolidated(persistent_by_type, output_file=f"{output_prefix}_consolidated.png")
-    logger.info("\n🎉 Analysis completed successfully!")
+        plotter.plot_network(
+            persistent_interactions,
+            output_file=str(output_dir / f"{output_prefix}_interactions_{interaction_type}.png"),
+            title=f"{interaction_type.replace('_', ' ').title()} Interactions"
+        )
+    plotter.plot_consolidated(persistent_by_type, output_file=str(output_dir / f"{output_prefix}_consolidated.png"))
+    # Save persistent interaction data as JSON
+    with open(output_dir / "persistent_interactions.json", "w") as f:
+        json.dump(persistent_by_type, f, indent=2)
+    logger.info("\n🎉 Analysis completed successfully! All results are in: %s", output_dir)
 
 if __name__ == "__main__":
     main()
