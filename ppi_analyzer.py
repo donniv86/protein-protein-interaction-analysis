@@ -75,6 +75,12 @@ class ComprehensivePPIAnalyzer:
         self.interaction_distance_history = {}
         self.total_frames_analyzed = 0
 
+        # Temporal analysis data structures
+        self.temporal_interactions = {}  # Track interactions over time
+        self.interaction_timeline = {}   # Timeline of when interactions appear/disappear
+        self.chain_interaction_stats = {}  # Statistics per chain pair
+        self.frame_interactions = []     # List of interactions per frame
+
         # Interaction type definitions with professional styling
         self.interaction_types = {
             'hydrogen_bond': {
@@ -612,6 +618,9 @@ class ComprehensivePPIAnalyzer:
 
     def analyze_trajectory_with_occupancy(self, max_frames=1000, max_workers=4):
         """Analyze multiple frames from trajectory to calculate occupancy percentages using multi-threading."""
+        # Ensure structure is loaded
+        if self.structure is None:
+            self.load_structure()
         print(f"🎬 Analyzing trajectory for occupancy calculation (max {max_frames} frames, {max_workers} workers)...")
 
         if not self.trajectory_file or not self.trajectory_file.exists():
@@ -742,27 +751,13 @@ class ComprehensivePPIAnalyzer:
 
     def _filter_by_occupancy(self, interactions, occupancy_threshold):
         """Filter interactions by occupancy threshold."""
-        print(f"🔍 Filtering interactions by ≥{occupancy_threshold*100:.0f}% occupancy...")
-
         filtered_interactions = []
-        for key, occupancy_data in self.interaction_occupancy.items():
-            occupancy = occupancy_data['count'] / self.total_frames_analyzed
+
+        for interaction in interactions:
+            occupancy = interaction.get('occupancy', 1.0)
             if occupancy >= occupancy_threshold:
-                interaction = occupancy_data['example'].copy()
-                interaction['occupancy'] = occupancy
-                interaction['frames'] = occupancy_data['count']
-
-                # Add distance statistics
-                if key in self.interaction_distance_history:
-                    distances = self.interaction_distance_history[key]
-                    interaction['min_distance'] = min(distances)
-                    interaction['max_distance'] = max(distances)
-                    interaction['mean_distance'] = np.mean(distances)
-                    interaction['std_distance'] = np.std(distances)
-
                 filtered_interactions.append(interaction)
 
-        print(f"✅ Kept {len(filtered_interactions)} interactions with ≥{occupancy_threshold*100:.0f}% occupancy out of {len(interactions)} total")
         return filtered_interactions
 
     def create_network_graph(self, interactions):
@@ -796,6 +791,9 @@ class ComprehensivePPIAnalyzer:
 
     def create_network_diagram(self, G, interactions, output_file='ppi_network.png'):
         """Create a journal-quality network diagram with professional layout."""
+        if len(G.nodes()) == 0:
+            print(f"⚠️ No nodes in the network graph. Skipping network diagram plot: {output_file}")
+            return
         print(f"🎨 Creating journal-quality network diagram: {output_file}")
 
         # Set up the plot with journal-quality dimensions (A4 ratio)
@@ -1248,6 +1246,617 @@ class ComprehensivePPIAnalyzer:
 
         print(f"✅ Summary saved to {summary_file}")
 
+    def analyze_temporal_interactions(self, max_frames=1000, max_workers=4):
+        """Analyze temporal dynamics of interactions during simulation."""
+        print("⏰ Analyzing temporal interaction dynamics...")
+
+        if not self.trajectory_file:
+            print("❌ No trajectory file available for temporal analysis")
+            return
+
+        # Initialize temporal tracking
+        self.temporal_interactions = {}
+        self.interaction_timeline = {}
+        self.chain_interaction_stats = {}
+        self.frame_interactions = []
+
+        # Get chain pairs for analysis
+        chain_pairs = []
+        for i, group1 in enumerate(self.chain_groups):
+            for group2 in self.chain_groups[i+1:]:
+                chain_pairs.append((group1, group2))
+
+        print(f"🔗 Analyzing temporal dynamics for {len(chain_pairs)} chain pairs")
+
+        # Load trajectory
+        try:
+            msys_model, cms_model = topo.read_cms(str(self.cms_file))
+            tr = traj.read_traj(str(self.trajectory_file))
+
+            total_frames = min(len(tr), max_frames)
+            print(f"📊 Analyzing {total_frames} frames for temporal dynamics")
+
+            # Analyze each frame
+            for frame_idx in range(total_frames):
+                frame = tr[frame_idx]
+
+                # Get structure from frame - Desmond frames have different methods
+                try:
+                    # Try different methods to get structure from frame
+                    if hasattr(frame, 'getStructure'):
+                        frame_structure = frame.getStructure()
+                    elif hasattr(frame, 'structure'):
+                        frame_structure = frame.structure
+                    elif hasattr(frame, 'get_structure'):
+                        frame_structure = frame.get_structure()
+                    else:
+                        # For Desmond, we need to create a proper structure from the frame
+                        # Use the original structure as template and update coordinates
+                        frame_structure = self.structure.copy()
+
+                        # Update atom coordinates from frame
+                        if hasattr(frame, 'pos') and hasattr(frame, 'getPositions'):
+                            try:
+                                positions = frame.getPositions()
+                                for i, atom in enumerate(frame_structure.atom):
+                                    if i < len(positions):
+                                        atom.xyz = positions[i]
+                            except:
+                                print(f"⚠️ Warning: Could not update coordinates for frame {frame_idx}")
+                        elif hasattr(frame, 'getPositions'):
+                            try:
+                                positions = frame.getPositions()
+                                for i, atom in enumerate(frame_structure.atom):
+                                    if i < len(positions):
+                                        atom.xyz = positions[i]
+                            except:
+                                print(f"⚠️ Warning: Could not update coordinates for frame {frame_idx}")
+                        else:
+                            print(f"⚠️ Warning: Could not extract coordinates from frame {frame_idx}, using original structure")
+
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not get structure from frame {frame_idx}: {e}")
+                    continue
+
+                # Analyze interactions in this frame
+                frame_interactions = self.analyze_frame(frame_structure)
+
+                # Store frame interactions
+                self.frame_interactions.append({
+                    'frame': frame_idx,
+                    'time': frame_idx * frame.getTimeStep() if hasattr(frame, 'getTimeStep') else frame_idx,
+                    'interactions': frame_interactions
+                })
+
+                # Track temporal dynamics
+                self._update_temporal_tracking(frame_idx, frame_interactions, chain_pairs)
+
+                if frame_idx % 100 == 0:
+                    print(f"   Processed frame {frame_idx}/{total_frames}")
+
+            # Calculate temporal statistics
+            self._calculate_temporal_statistics(chain_pairs)
+
+            print(f"✅ Temporal analysis completed for {total_frames} frames")
+
+        except Exception as e:
+            print(f"❌ Error in temporal analysis: {e}")
+            raise
+
+    def _update_temporal_tracking(self, frame_idx, frame_interactions, chain_pairs):
+        """Update temporal tracking data structures."""
+        frame_time = frame_idx  # Can be converted to actual time if needed
+
+        # Track interactions by chain pair
+        for group1, group2 in chain_pairs:
+            pair_key = f"{','.join(group1)}_vs_{','.join(group2)}"
+
+            if pair_key not in self.temporal_interactions:
+                self.temporal_interactions[pair_key] = {
+                    'frames': [],
+                    'interaction_types': defaultdict(list),
+                    'residue_pairs': defaultdict(list)
+                }
+
+            # Filter interactions for this chain pair
+            pair_interactions = []
+            for interaction in frame_interactions:
+                res1 = interaction.get('donor', interaction.get('residue1', ''))
+                res2 = interaction.get('acceptor', interaction.get('residue2', ''))
+
+                # Check if interaction is between the chain pair
+                chain1_in_group1 = any(chain in group1 for chain in [res1.split(':')[0] if ':' in res1 else ''])
+                chain2_in_group2 = any(chain in group2 for chain in [res2.split(':')[0] if ':' in res2 else ''])
+                chain1_in_group2 = any(chain in group2 for chain in [res1.split(':')[0] if ':' in res1 else ''])
+                chain2_in_group1 = any(chain in group1 for chain in [res2.split(':')[0] if ':' in res2 else ''])
+
+                if ((chain1_in_group1 and chain2_in_group2) or
+                    (chain1_in_group2 and chain2_in_group1)):
+                    pair_interactions.append(interaction)
+
+            # Update temporal tracking
+            self.temporal_interactions[pair_key]['frames'].append(frame_time)
+
+            # Track by interaction type
+            for interaction in pair_interactions:
+                interaction_type = interaction['type']
+                self.temporal_interactions[pair_key]['interaction_types'][interaction_type].append(frame_time)
+
+                # Track specific residue pairs
+                res_pair = f"{interaction.get('donor', interaction.get('residue1', ''))}-{interaction.get('acceptor', interaction.get('residue2', ''))}"
+                self.temporal_interactions[pair_key]['residue_pairs'][res_pair].append(frame_time)
+
+    def _calculate_temporal_statistics(self, chain_pairs):
+        """Calculate temporal statistics for each chain pair."""
+        print("📊 Calculating temporal statistics...")
+
+        for group1, group2 in chain_pairs:
+            pair_key = f"{','.join(group1)}_vs_{','.join(group2)}"
+
+            if pair_key not in self.temporal_interactions:
+                continue
+
+            temporal_data = self.temporal_interactions[pair_key]
+            total_frames = len(temporal_data['frames'])
+
+            # Calculate statistics
+            stats = {
+                'total_frames': total_frames,
+                'interaction_type_stats': {},
+                'residue_pair_stats': {},
+                'persistent_interactions': [],
+                'transient_interactions': [],
+                'interaction_events': []
+            }
+
+            # Analyze interaction types
+            for interaction_type, frames in temporal_data['interaction_types'].items():
+                presence_frames = len(frames)
+                occupancy = presence_frames / total_frames if total_frames > 0 else 0
+
+                stats['interaction_type_stats'][interaction_type] = {
+                    'total_frames': presence_frames,
+                    'occupancy': occupancy,
+                    'first_frame': min(frames) if frames else None,
+                    'last_frame': max(frames) if frames else None,
+                    'duration': max(frames) - min(frames) + 1 if frames else 0
+                }
+
+            # Analyze residue pairs
+            for res_pair, frames in temporal_data['residue_pairs'].items():
+                presence_frames = len(frames)
+                occupancy = presence_frames / total_frames if total_frames > 0 else 0
+
+                stats['residue_pair_stats'][res_pair] = {
+                    'total_frames': presence_frames,
+                    'occupancy': occupancy,
+                    'first_frame': min(frames) if frames else None,
+                    'last_frame': max(frames) if frames else None,
+                    'duration': max(frames) - min(frames) + 1 if frames else 0
+                }
+
+                # Classify as persistent or transient
+                if occupancy >= 0.5:  # Present in >50% of frames
+                    stats['persistent_interactions'].append(res_pair)
+                else:
+                    stats['transient_interactions'].append(res_pair)
+
+            self.chain_interaction_stats[pair_key] = stats
+
+    def print_temporal_analysis(self):
+        """Print comprehensive temporal analysis results."""
+        if not self.chain_interaction_stats:
+            print("❌ No temporal analysis data available")
+            return
+
+        print("\n" + "="*80)
+        print("⏰ TEMPORAL INTERACTION DYNAMICS ANALYSIS")
+        print("="*80)
+
+        for pair_key, stats in self.chain_interaction_stats.items():
+            print(f"\n🔗 Chain Pair: {pair_key}")
+            print(f"📊 Total Frames Analyzed: {stats['total_frames']}")
+
+            # Interaction type statistics
+            print(f"\n📈 Interaction Type Statistics:")
+            for interaction_type, type_stats in stats['interaction_type_stats'].items():
+                label = self.interaction_types[interaction_type]['label']
+                occupancy_pct = type_stats['occupancy'] * 100
+                duration = type_stats['duration']
+                print(f"   {label}: {type_stats['total_frames']} frames ({occupancy_pct:.1f}% occupancy)")
+                print(f"     Duration: {duration} frames (frames {type_stats['first_frame']}-{type_stats['last_frame']})")
+
+            # Persistent vs transient interactions
+            print(f"\n🔒 Persistent Interactions (≥50% occupancy): {len(stats['persistent_interactions'])}")
+            for res_pair in stats['persistent_interactions'][:10]:  # Show first 10
+                pair_stats = stats['residue_pair_stats'][res_pair]
+                occupancy_pct = pair_stats['occupancy'] * 100
+                print(f"   {res_pair}: {occupancy_pct:.1f}% occupancy")
+
+            print(f"\n⚡ Transient Interactions (<50% occupancy): {len(stats['transient_interactions'])}")
+            for res_pair in stats['transient_interactions'][:10]:  # Show first 10
+                pair_stats = stats['residue_pair_stats'][res_pair]
+                occupancy_pct = pair_stats['occupancy'] * 100
+                print(f"   {res_pair}: {occupancy_pct:.1f}% occupancy")
+
+            print("-" * 60)
+
+    def save_temporal_analysis(self, output_prefix='temporal_analysis'):
+        """Save temporal analysis results to files."""
+        print(f"🔍 DEBUG: save_temporal_analysis called with output_prefix: {output_prefix}")
+
+        if not self.chain_interaction_stats:
+            print("❌ No temporal analysis data to save")
+            print(f"🔍 DEBUG: chain_interaction_stats is empty: {self.chain_interaction_stats}")
+            return
+
+        print(f"🔍 DEBUG: Found {len(self.chain_interaction_stats)} chain pairs in stats")
+        print(f"🔍 DEBUG: Chain pairs: {list(self.chain_interaction_stats.keys())}")
+
+        print(f"💾 Saving temporal analysis results...")
+
+        # Save detailed temporal statistics
+        temporal_file = f"{output_prefix}_statistics.json"
+        with open(temporal_file, 'w') as f:
+            json.dump(self.chain_interaction_stats, f, indent=2, default=str)
+        print(f"✅ Temporal statistics saved to {temporal_file}")
+
+        # Save frame-by-frame interactions
+        frame_file = f"{output_prefix}_frame_data.json"
+        with open(frame_file, 'w') as f:
+            json.dump(self.frame_interactions, f, indent=2, default=str)
+        print(f"✅ Frame-by-frame data saved to {frame_file}")
+
+        # Save temporal interaction data
+        temporal_data_file = f"{output_prefix}_temporal_data.json"
+        with open(temporal_data_file, 'w') as f:
+            json.dump(self.temporal_interactions, f, indent=2, default=str)
+        print(f"✅ Temporal interaction data saved to {temporal_data_file}")
+
+        # Create summary CSV
+        summary_file = f"{output_prefix}_summary.csv"
+        with open(summary_file, 'w') as f:
+            f.write("Chain_Pair,Interaction_Type,Total_Frames,Occupancy_Percent,Duration,First_Frame,Last_Frame\n")
+
+            for pair_key, stats in self.chain_interaction_stats.items():
+                for interaction_type, type_stats in stats['interaction_type_stats'].items():
+                    occupancy_pct = type_stats['occupancy'] * 100
+                    f.write(f"{pair_key},{interaction_type},{type_stats['total_frames']},"
+                           f"{occupancy_pct:.2f},{type_stats['duration']},"
+                           f"{type_stats['first_frame']},{type_stats['last_frame']}\n")
+
+        print(f"✅ Summary CSV saved to {summary_file}")
+
+        # Create temporal analysis plots
+        print(f"🔍 DEBUG: About to call create_temporal_plots with output_prefix: {output_prefix}")
+        self.create_temporal_plots(output_prefix)
+        print(f"🔍 DEBUG: Finished create_temporal_plots call")
+
+    def create_temporal_plots(self, output_prefix='temporal_analysis'):
+        """Create comprehensive temporal analysis plots."""
+        print(f"🔍 DEBUG: create_temporal_plots called with output_prefix: {output_prefix}")
+
+        if not self.chain_interaction_stats:
+            print("❌ No temporal analysis data available for plotting")
+            print(f"🔍 DEBUG: chain_interaction_stats is empty: {self.chain_interaction_stats}")
+            return
+
+        print(f"🔍 DEBUG: Found {len(self.chain_interaction_stats)} chain pairs for plotting")
+        print(f"🔍 DEBUG: Chain pairs: {list(self.chain_interaction_stats.keys())}")
+
+        print("📊 Creating temporal analysis plots...")
+
+        # Create a comprehensive figure with multiple subplots
+        fig = plt.figure(figsize=(20, 16))
+
+        # 1. Interaction Type Timeline Plot
+        ax1 = plt.subplot(3, 2, 1)
+        self._plot_interaction_timeline(ax1)
+
+        # 2. Occupancy Heatmap
+        ax2 = plt.subplot(3, 2, 2)
+        self._plot_occupancy_heatmap(ax2)
+
+        # 3. Interaction Duration Distribution
+        ax3 = plt.subplot(3, 2, 3)
+        self._plot_duration_distribution(ax3)
+
+        # 4. Persistent vs Transient Interactions
+        ax4 = plt.subplot(3, 2, 4)
+        self._plot_persistent_vs_transient(ax4)
+
+        # 5. Frame-by-Frame Interaction Count
+        ax5 = plt.subplot(3, 2, 5)
+        self._plot_frame_interaction_count(ax5)
+
+        # 6. Chain Pair Comparison
+        ax6 = plt.subplot(3, 2, 6)
+        self._plot_chain_pair_comparison(ax6)
+
+        plt.tight_layout(pad=3.0)
+
+        # Save the comprehensive plot
+        plot_file = f"{output_prefix}_temporal_plots.png"
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"✅ Temporal plots saved to {plot_file}")
+        plt.close()
+
+        # Create individual detailed plots
+        self._create_detailed_temporal_plots(output_prefix)
+
+    def _plot_interaction_timeline(self, ax):
+        """Plot interaction timeline showing when different types appear/disappear."""
+        ax.set_title('Interaction Timeline by Type', fontsize=14, fontweight='bold')
+
+        colors = ['#3498db', '#27ae60', '#9b59b6', '#e67e22', '#f1c40f', '#e74c3c']
+        interaction_types = list(self.interaction_types.keys())
+
+        for i, (pair_key, stats) in enumerate(self.chain_interaction_stats.items()):
+            for j, interaction_type in enumerate(interaction_types):
+                if interaction_type in stats['interaction_type_stats']:
+                    type_stats = stats['interaction_type_stats'][interaction_type]
+                    if type_stats['first_frame'] is not None and type_stats['last_frame'] is not None:
+                        # Plot horizontal line for interaction duration
+                        ax.hlines(y=f"{pair_key}_{interaction_type}",
+                                xmin=type_stats['first_frame'],
+                                xmax=type_stats['last_frame'],
+                                colors=colors[j % len(colors)],
+                                linewidth=3,
+                                alpha=0.8,
+                                label=f"{self.interaction_types[interaction_type]['label']}")
+
+        ax.set_xlabel('Frame Number', fontsize=12)
+        ax.set_ylabel('Chain Pair - Interaction Type', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    def _plot_occupancy_heatmap(self, ax):
+        """Plot occupancy heatmap for different interaction types."""
+        ax.set_title('Interaction Type Occupancy Heatmap', fontsize=14, fontweight='bold')
+
+        # Prepare data for heatmap
+        interaction_types = list(self.interaction_types.keys())
+        chain_pairs = list(self.chain_interaction_stats.keys())
+
+        occupancy_data = []
+        labels = []
+
+        for pair_key in chain_pairs:
+            stats = self.chain_interaction_stats[pair_key]
+            row = []
+            for interaction_type in interaction_types:
+                if interaction_type in stats['interaction_type_stats']:
+                    occupancy = stats['interaction_type_stats'][interaction_type]['occupancy']
+                    row.append(occupancy)
+                else:
+                    row.append(0.0)
+            occupancy_data.append(row)
+            labels.append(pair_key)
+
+        if occupancy_data:
+            im = ax.imshow(occupancy_data, cmap='YlOrRd', aspect='auto')
+
+            # Add text annotations
+            for i in range(len(occupancy_data)):
+                for j in range(len(occupancy_data[0])):
+                    text = ax.text(j, i, f'{occupancy_data[i][j]:.2f}',
+                                 ha="center", va="center", color="black", fontsize=10)
+
+            ax.set_xticks(range(len(interaction_types)))
+            ax.set_xticklabels([self.interaction_types[it]['label'] for it in interaction_types],
+                              rotation=45, ha='right')
+            ax.set_yticks(range(len(labels)))
+            ax.set_yticklabels(labels)
+
+            plt.colorbar(im, ax=ax, label='Occupancy')
+
+    def _plot_duration_distribution(self, ax):
+        """Plot distribution of interaction durations."""
+        ax.set_title('Interaction Duration Distribution', fontsize=14, fontweight='bold')
+
+        all_durations = []
+        duration_labels = []
+
+        for pair_key, stats in self.chain_interaction_stats.items():
+            for interaction_type, type_stats in stats['interaction_type_stats'].items():
+                if type_stats['duration'] > 0:
+                    all_durations.append(type_stats['duration'])
+                    duration_labels.append(f"{pair_key}_{interaction_type}")
+
+        if all_durations:
+            ax.hist(all_durations, bins=20, alpha=0.7, color='skyblue', edgecolor='black')
+            ax.set_xlabel('Duration (frames)', fontsize=12)
+            ax.set_ylabel('Number of Interactions', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+    def _plot_persistent_vs_transient(self, ax):
+        """Plot persistent vs transient interactions."""
+        ax.set_title('Persistent vs Transient Interactions', fontsize=14, fontweight='bold')
+
+        persistent_counts = []
+        transient_counts = []
+        chain_labels = []
+
+        for pair_key, stats in self.chain_interaction_stats.items():
+            persistent_counts.append(len(stats['persistent_interactions']))
+            transient_counts.append(len(stats['transient_interactions']))
+            chain_labels.append(pair_key)
+
+        if persistent_counts:
+            x = np.arange(len(chain_labels))
+            width = 0.35
+
+            ax.bar(x - width/2, persistent_counts, width, label='Persistent (≥50%)',
+                   color='#27ae60', alpha=0.8)
+            ax.bar(x + width/2, transient_counts, width, label='Transient (<50%)',
+                   color='#e74c3c', alpha=0.8)
+
+            ax.set_xlabel('Chain Pairs', fontsize=12)
+            ax.set_ylabel('Number of Interactions', fontsize=12)
+            ax.set_xticks(x)
+            ax.set_xticklabels(chain_labels, rotation=45, ha='right')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+    def _plot_frame_interaction_count(self, ax):
+        """Plot total interaction count per frame."""
+        ax.set_title('Total Interactions per Frame', fontsize=14, fontweight='bold')
+
+        if not self.frame_interactions:
+            return
+
+        frames = [fi['frame'] for fi in self.frame_interactions]
+        interaction_counts = [len(fi['interactions']) for fi in self.frame_interactions]
+
+        ax.plot(frames, interaction_counts, linewidth=2, color='#3498db', alpha=0.8)
+        ax.set_xlabel('Frame Number', fontsize=12)
+        ax.set_ylabel('Number of Interactions', fontsize=12)
+        ax.grid(True, alpha=0.3)
+
+    def _plot_chain_pair_comparison(self, ax):
+        """Plot comparison of interaction types between chain pairs."""
+        ax.set_title('Interaction Type Comparison by Chain Pair', fontsize=14, fontweight='bold')
+
+        interaction_types = list(self.interaction_types.keys())
+        chain_pairs = list(self.chain_interaction_stats.keys())
+
+        if not chain_pairs:
+            return
+
+        # Prepare data
+        data = []
+        for interaction_type in interaction_types:
+            row = []
+            for pair_key in chain_pairs:
+                stats = self.chain_interaction_stats[pair_key]
+                if interaction_type in stats['interaction_type_stats']:
+                    count = stats['interaction_type_stats'][interaction_type]['total_frames']
+                    row.append(count)
+                else:
+                    row.append(0)
+            data.append(row)
+
+        if data:
+            x = np.arange(len(chain_pairs))
+            width = 0.15
+
+            for i, interaction_type in enumerate(interaction_types):
+                ax.bar(x + i*width, data[i], width,
+                       label=self.interaction_types[interaction_type]['label'],
+                       alpha=0.8)
+
+            ax.set_xlabel('Chain Pairs', fontsize=12)
+            ax.set_ylabel('Total Frames with Interaction', fontsize=12)
+            ax.set_xticks(x + width * (len(interaction_types) - 1) / 2)
+            ax.set_xticklabels(chain_pairs, rotation=45, ha='right')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.grid(True, alpha=0.3)
+
+    def _create_detailed_temporal_plots(self, output_prefix):
+        """Create individual detailed temporal plots."""
+        # 1. Detailed timeline plot
+        self._create_detailed_timeline_plot(output_prefix)
+
+        # 2. Residue pair occupancy plot
+        self._create_residue_occupancy_plot(output_prefix)
+
+    def _create_detailed_timeline_plot(self, output_prefix):
+        """Create detailed timeline plot showing all interactions."""
+        if not self.frame_interactions:
+            return
+
+        fig, ax = plt.subplots(figsize=(16, 10))
+
+        # Get all unique interactions
+        all_interactions = set()
+        for frame_data in self.frame_interactions:
+            for interaction in frame_data['interactions']:
+                res1 = interaction.get('donor', interaction.get('residue1', ''))
+                res2 = interaction.get('acceptor', interaction.get('residue2', ''))
+                interaction_type = interaction['type']
+                all_interactions.add(f"{res1}-{res2}-{interaction_type}")
+
+        # Create timeline for each interaction
+        interaction_timeline = {interaction: [] for interaction in all_interactions}
+
+        for frame_data in self.frame_interactions:
+            frame = frame_data['frame']
+            frame_interactions = set()
+
+            for interaction in frame_data['interactions']:
+                res1 = interaction.get('donor', interaction.get('residue1', ''))
+                res2 = interaction.get('acceptor', interaction.get('residue2', ''))
+                interaction_type = interaction['type']
+                interaction_key = f"{res1}-{res2}-{interaction_type}"
+                frame_interactions.add(interaction_key)
+
+            for interaction in all_interactions:
+                if interaction in frame_interactions:
+                    interaction_timeline[interaction].append(frame)
+
+        # Plot timeline
+        colors = plt.cm.Set3(np.linspace(0, 1, len(all_interactions)))
+
+        for i, (interaction, frames) in enumerate(interaction_timeline.items()):
+            if frames:
+                ax.hlines(y=i, xmin=min(frames), xmax=max(frames),
+                         colors=colors[i], linewidth=2, alpha=0.8)
+
+        ax.set_title('Detailed Interaction Timeline', fontsize=16, fontweight='bold')
+        ax.set_xlabel('Frame Number', fontsize=14)
+        ax.set_ylabel('Interactions', fontsize=14)
+        ax.grid(True, alpha=0.3)
+
+        # Save plot
+        timeline_file = f"{output_prefix}_detailed_timeline.png"
+        plt.savefig(timeline_file, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+        print(f"✅ Detailed timeline plot saved to {timeline_file}")
+
+    def _create_residue_occupancy_plot(self, output_prefix):
+        """Create residue pair occupancy plot."""
+        if not self.chain_interaction_stats:
+            return
+
+        fig, ax = plt.subplots(figsize=(14, 10))
+
+        # Get top residue pairs by occupancy
+        all_residue_stats = []
+        for pair_key, stats in self.chain_interaction_stats.items():
+            for res_pair, res_stats in stats['residue_pair_stats'].items():
+                all_residue_stats.append({
+                    'pair': res_pair,
+                    'occupancy': res_stats['occupancy'],
+                    'chain_pair': pair_key
+                })
+
+        # Sort by occupancy and take top 20
+        all_residue_stats.sort(key=lambda x: x['occupancy'], reverse=True)
+        top_residues = all_residue_stats[:20]
+
+        if top_residues:
+            residues = [item['pair'] for item in top_residues]
+            occupancies = [item['occupancy'] * 100 for item in top_residues]
+            colors = ['#27ae60' if occ >= 50 else '#e74c3c' for occ in occupancies]
+
+            bars = ax.barh(range(len(residues)), occupancies, color=colors, alpha=0.8)
+            ax.set_yticks(range(len(residues)))
+            ax.set_yticklabels(residues)
+            ax.set_xlabel('Occupancy (%)', fontsize=14)
+            ax.set_title('Top 20 Residue Pair Occupancies', fontsize=16, fontweight='bold')
+            ax.grid(True, alpha=0.3, axis='x')
+
+            # Add value labels on bars
+            for i, (bar, occ) in enumerate(zip(bars, occupancies)):
+                ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height()/2,
+                       f'{occ:.1f}%', va='center', fontsize=10)
+
+        # Save plot
+        occupancy_file = f"{output_prefix}_residue_occupancy.png"
+        plt.savefig(occupancy_file, dpi=300, bbox_inches='tight', facecolor='white')
+        plt.close()
+        print(f"✅ Residue occupancy plot saved to {occupancy_file}")
+
 def main():
     """Main function with comprehensive argument parsing."""
     parser = argparse.ArgumentParser(
@@ -1263,6 +1872,9 @@ Examples:
 
   # Trajectory analysis with occupancy
   python ppi_analyzer.py --cms structure.cms --traj trajectory_dir --max-frames 500 --occupancy-threshold 0.3
+
+  # Trajectory analysis with temporal dynamics (default)
+  python ppi_analyzer.py --cms structure.cms --traj trajectory_dir --max-frames 1000
 
   # Structure-only analysis with custom output
   python ppi_analyzer.py --cms structure.cms --output my_analysis
@@ -1283,6 +1895,8 @@ Examples:
                        help='Maximum number of worker threads for parallel processing (default: 4)')
     parser.add_argument('--occupancy-threshold', type=float, default=0.2,
                        help='Minimum occupancy threshold (0.0-1.0, default: 0.2)')
+    parser.add_argument('--temporal-analysis', action='store_true',
+                       help='Perform detailed temporal analysis of interaction dynamics')
 
     args = parser.parse_args()
 
@@ -1308,6 +1922,19 @@ Examples:
         # Analyze interactions
         if args.traj:
             interactions = analyzer.analyze_trajectory_with_occupancy(max_frames=args.max_frames, max_workers=args.max_workers)
+
+            # Perform temporal analysis by default when trajectory is provided
+            print("\n" + "="*60)
+            print("⏰ PERFORMING TEMPORAL INTERACTION ANALYSIS (DEFAULT)")
+            print("="*60)
+            print(f"🔍 DEBUG: Running temporal analysis by default with trajectory")
+            analyzer.analyze_temporal_interactions(max_frames=args.max_frames, max_workers=args.max_workers)
+            analyzer.print_temporal_analysis()
+            analyzer.save_temporal_analysis(f"{args.output}_temporal")
+
+            # Also run if explicitly requested (for backward compatibility)
+            if args.temporal_analysis:
+                print(f"🔍 DEBUG: Temporal analysis flag is also set: {args.temporal_analysis}")
         else:
             interactions = analyzer.analyze_frame(analyzer.structure)
 
@@ -1325,6 +1952,14 @@ Examples:
             print(f"   Network diagram: {args.output}_network.png")
             print(f"   Interactions data: {args.output}_interactions.json")
             print(f"   Summary report: {args.output}_summary.txt")
+
+            if args.traj:
+                print(f"   Temporal statistics: {args.output}_temporal_statistics.json")
+                print(f"   Frame-by-frame data: {args.output}_temporal_frame_data.json")
+                print(f"   Temporal summary: {args.output}_temporal_summary.csv")
+                print(f"   Comprehensive temporal plots: {args.output}_temporal_temporal_plots.png")
+                print(f"   Detailed timeline: {args.output}_temporal_detailed_timeline.png")
+                print(f"   Residue occupancy: {args.output}_temporal_residue_occupancy.png")
         else:
             print("⚠️ No significant interactions found")
 

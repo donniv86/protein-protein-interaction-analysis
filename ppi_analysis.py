@@ -24,6 +24,9 @@ except ImportError:
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+# Set Helvetica as default font for all plots, with robust fallback
+matplotlib.rcParams['font.sans-serif'] = ['Helvetica', 'Arial', 'DejaVu Sans']
+matplotlib.rcParams['font.family'] = 'sans-serif'
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as path_effects
@@ -52,264 +55,174 @@ INTERACTION_STYLES = {
     'pi_cation': {'color': '#FF4500', 'style': 'dashdot', 'width': 2.5, 'label': 'π-Cation'},
 }
 
-# --- Analysis Class ---
-class PPIAnalyzer:
-    """
-    Analyze protein-protein non-bonding interactions from MD trajectories.
-    """
-    def __init__(self, structure, chain_groups: List[List[str]], logger):
-        self.structure = structure
-        self.chain_groups = chain_groups
-        self.logger = logger
-
-    def analyze_hydrogen_bonds(self, structure, group1: List[str], group2: List[str]) -> List[Dict[str, Any]]:
-        from schrodinger.structutils.analyze import hbond
-        NON_PROTEIN = {'HOH', 'WAT', 'TIP3', 'SOL', 'SPC', 'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'FE', 'CU', 'MN'}
-        HBOND_CUTOFF = 2.8
-        hbonds = hbond.get_hydrogen_bonds(structure, max_dist=HBOND_CUTOFF)
-        interactions = []
-        for hb in hbonds:
-            donor_atom, acceptor_atom = hb[0], hb[1]
-            donor_res = donor_atom.getResidue()
-            acceptor_res = acceptor_atom.getResidue()
-            donor_chain = str(donor_res.chain)
-            acceptor_chain = str(acceptor_res.chain)
-            if donor_res.pdbres.strip() in NON_PROTEIN or acceptor_res.pdbres.strip() in NON_PROTEIN:
-                continue
-            if ((donor_chain in group1 and acceptor_chain in group2) or
-                (donor_chain in group2 and acceptor_chain in group1)):
-                interactions.append({
-                    'type': 'hydrogen_bond',
-                    'donor': f"{donor_chain}:{donor_res.pdbres.strip()}{donor_res.resnum}",
-                    'acceptor': f"{acceptor_chain}:{acceptor_res.pdbres.strip()}{acceptor_res.resnum}",
-                    'distance': np.linalg.norm(np.array(donor_atom.xyz) - np.array(acceptor_atom.xyz))
-                })
-        return interactions
-
-    def analyze_salt_bridges(self, structure, group1: List[str], group2: List[str]) -> List[Dict[str, Any]]:
-        CATIONIC_RES = {'ARG', 'LYS'}
-        ANIONIC_RES = {'ASP', 'GLU'}
-        NON_PROTEIN = {'HOH', 'WAT', 'TIP3', 'SOL', 'SPC', 'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'FE', 'CU', 'MN'}
-        SALT_BRIDGE_CUTOFF = 5.0
-        interactions = []
-        charged_atoms1, charged_atoms2 = [], []
-        for atom in structure.atom:
-            res = atom.getResidue()
-            chain = str(res.chain)
-            if res.pdbres.strip() in NON_PROTEIN:
-                continue
-            if chain in group1 and res.pdbres.strip() in (CATIONIC_RES | ANIONIC_RES):
-                charged_atoms1.append(atom)
-            elif chain in group2 and res.pdbres.strip() in (CATIONIC_RES | ANIONIC_RES):
-                charged_atoms2.append(atom)
-        if charged_atoms1 and charged_atoms2:
-            coords1 = np.array([a.xyz for a in charged_atoms1])
-            coords2 = np.array([a.xyz for a in charged_atoms2])
-            dists = np.linalg.norm(coords1[:, None, :] - coords2[None, :, :], axis=2)
-            idxs = np.where(dists <= SALT_BRIDGE_CUTOFF)
-            for i, j in zip(*idxs):
-                res1 = charged_atoms1[i].getResidue()
-                res2 = charged_atoms2[j].getResidue()
-                interactions.append({
-                    'type': 'salt_bridge',
-                    'res1': f"{res1.chain}:{res1.pdbres.strip()}{res1.resnum}",
-                    'res2': f"{res2.chain}:{res2.pdbres.strip()}{res2.resnum}",
-                    'distance': dists[i, j]
-                })
-        return interactions
-
-    def analyze_pi_pi(self, structure, group1: List[str], group2: List[str]) -> List[Dict[str, Any]]:
-        AROMATIC_RES = {'PHE', 'TYR', 'TRP', 'HIS'}
-        interactions = []
-        arom1, arom2 = [], []
-        for atom in structure.atom:
-            res = atom.getResidue()
-            chain = str(res.chain)
-            if res.pdbres.strip() not in AROMATIC_RES:
-                continue
-            if chain in group1:
-                arom1.append(res)
-            elif chain in group2:
-                arom2.append(res)
-        centroids1 = [self.get_ring_centroid(r) for r in arom1]
-        centroids2 = [self.get_ring_centroid(r) for r in arom2]
-        PI_STACK_CUTOFF = 6.0
-        for i, c1 in enumerate(centroids1):
-            if c1 is None:
-                continue
-            for j, c2 in enumerate(centroids2):
-                if c2 is None:
-                    continue
-                dist = np.linalg.norm(c1 - c2)
-                if dist <= PI_STACK_CUTOFF:
-                    interactions.append({
-                        'type': 'pi_pi',
-                        'res1': f"{arom1[i].chain}:{arom1[i].pdbres.strip()}{arom1[i].resnum}",
-                        'res2': f"{arom2[j].chain}:{arom2[j].pdbres.strip()}{arom2[j].resnum}",
-                        'distance': dist
-                    })
-        return interactions
-
-    def analyze_pi_cation(self, structure, group1: List[str], group2: List[str]) -> List[Dict[str, Any]]:
-        AROMATIC_RES = {'PHE', 'TYR', 'TRP', 'HIS'}
-        CATIONIC_RES = {'ARG', 'LYS'}
-        interactions = []
-        aroms, cations = [], []
-        for atom in structure.atom:
-            res = atom.getResidue()
-            chain = str(res.chain)
-            if res.pdbres.strip() in AROMATIC_RES and chain in group1:
-                aroms.append(res)
-            elif res.pdbres.strip() in CATIONIC_RES and chain in group2:
-                cations.append(res)
-        PI_CATION_CUTOFF = 6.0
-        for arom in aroms:
-            c1 = self.get_ring_centroid(arom)
-            if c1 is None:
-                continue
-            for cat in cations:
-                c2 = self.get_cation_center(cat)
-                if c2 is None:
-                    continue
-                dist = np.linalg.norm(c1 - c2)
-                if dist <= PI_CATION_CUTOFF:
-                    interactions.append({
-                        'type': 'pi_cation',
-                        'aromatic': f"{arom.chain}:{arom.pdbres.strip()}{arom.resnum}",
-                        'cation': f"{cat.chain}:{cat.pdbres.strip()}{cat.resnum}",
-                        'distance': dist
-                    })
-        return interactions
-
-    @staticmethod
-    def get_ring_centroid(res) -> Any:
-        ring_atoms = [atom for atom in res.atom if atom.pdbname.strip() in ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ', 'CH2', 'NE1', 'CE3', 'CZ2', 'CZ3', 'CD', 'CE', 'NZ', 'ND1', 'NE2']]
-        if not ring_atoms:
-            return None
-        coords = np.array([atom.xyz for atom in ring_atoms])
-        return np.mean(coords, axis=0)
-
-    @staticmethod
-    def get_cation_center(res) -> Any:
-        if res.pdbres.strip() == 'ARG':
-            atom_names = ['NH1', 'NH2', 'CZ']
-        elif res.pdbres.strip() == 'LYS':
-            atom_names = ['NZ']
-        else:
-            return None
-        atoms = [atom for atom in res.atom if atom.pdbname.strip() in atom_names]
-        if not atoms:
-            return None
-        coords = np.array([atom.xyz for atom in atoms])
-        return np.mean(coords, axis=0)
+# Extend INTERACTION_STYLES to include analyzer aliases
+INTERACTION_STYLES.update({
+    'salt-bridge': INTERACTION_STYLES.get('salt_bridge', {
+        'color': '#2E8B57', 'style': 'solid', 'width': 3.0, 'label': 'Salt Bridge'}),
+    'pi-pi': INTERACTION_STYLES.get('pi_pi', {
+        'color': '#8A2BE2', 'style': 'dotted', 'width': 2.5, 'label': 'π-π Stacking'}),
+    'pi-cat': INTERACTION_STYLES.get('pi_cation', {
+        'color': '#FF4500', 'style': 'dashdot', 'width': 2.5, 'label': 'π-Cation'}),
+})
 
 # --- Plotting Class ---
 class PPIPlotter:
-    """
+    r"""
     Plot protein-protein interaction networks with uniform, professional style.
     Ensures consistent node size, font size, and layout for all interaction types.
+
+    :param logger: Logger instance
+    :type logger: logging.Logger
     """
     def __init__(self, logger):
         self.logger = logger
-        self.node_size = 2000  # Fixed node size for all plots (larger for clarity)
-        self.font_size = 12    # Fixed font size for all labels
+        # Default values (will be dynamically adjusted)
+        self.node_size = 1400
+        self.font_size = 10
+        self.arc_radius = 0.8
         self.layout_seed = 42  # Fixed seed for reproducible layouts
 
     def _draw_ppi_network(self, G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, title, group1_nodes=None, group2_nodes=None, legend_handles=None):
         import matplotlib.lines as mlines
-        fig, ax = plt.subplots(figsize=(10, 8))
-        # Determine left-right layout for two chain groups
-        unique_chains = sorted(set(node_chain[n] for n in G.nodes()))
-        # Group nodes by chain
-        chain_to_nodes = {chain: [n for n in G.nodes() if node_chain[n] == chain] for chain in unique_chains}
-        # If exactly two chain groups, use left-right layout
-        if len(unique_chains) == 2:
-            group1, group2 = unique_chains[0], unique_chains[1]
-            group1_nodes = chain_to_nodes[group1]
-            group2_nodes = chain_to_nodes[group2]
-            y_gap1 = 2.0 / max(1, len(group1_nodes)-1) if len(group1_nodes) > 1 else 0
-            y_gap2 = 2.0 / max(1, len(group2_nodes)-1) if len(group2_nodes) > 1 else 0
-            pos = {}
-            for i, n in enumerate(group1_nodes):
-                pos[n] = (-1, 1 - i * y_gap1)
-            for i, n in enumerate(group2_nodes):
-                pos[n] = (1, 1 - i * y_gap2)
+        n_nodes = len(G.nodes())
+        # Dynamic adjustment based on node count
+        if n_nodes <= 15:
+            node_size, font_size, arc_radius = 2000, 12, 0.7
+            fig_size = (12, 10)
+        elif n_nodes <= 30:
+            node_size, font_size, arc_radius = 1400, 10, 0.8
+            fig_size = (14, 12)
         else:
-            # Fallback: spring layout
-            pos = nx.spring_layout(G, seed=self.layout_seed)
-        # Node color by amino acid
-        node_colors = [AMINO_ACID_COLORS.get(node_resname[n], AMINO_ACID_COLORS['UNK']) for n in G.nodes()]
-        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=self.node_size, ax=ax, edgecolors='black', linewidths=1.5)
-        # Draw node labels with fixed font size
+            node_size, font_size, arc_radius = 1000, 8, 0.9
+            fig_size = (16, 14)
+        fig, ax = plt.subplots(figsize=fig_size)
+        # Determine unique chains and group nodes by chain
+        unique_chains = sorted(set(node_chain[n] for n in G.nodes()))
+        chain_to_nodes = {chain: [n for n in G.nodes() if node_chain[n] == chain] for chain in unique_chains}
+        pos = {}
+        # Schrodinger-style layout: two chains as left/right "leaves"/arcs
+        if len(unique_chains) == 2:
+            chain1, chain2 = unique_chains[0], unique_chains[1]
+            chain1_nodes = chain_to_nodes[chain1]
+            chain2_nodes = chain_to_nodes[chain2]
+            # Sort by residue number for each chain
+            def resnum_key(n):
+                try:
+                    return int(node_resnum[n])
+                except Exception:
+                    return 0
+            chain1_nodes.sort(key=resnum_key)
+            chain2_nodes.sort(key=resnum_key)
+            n1, n2 = len(chain1_nodes), len(chain2_nodes)
+            for i, n in enumerate(chain1_nodes):
+                angle = (i / max(1, n1-1)) * np.pi - np.pi/2  # from -90 to +90 deg
+                x = -1.0 + arc_radius * np.cos(angle)
+                y = arc_radius * np.sin(angle)
+                pos[n] = (x, y)
+            for i, n in enumerate(chain2_nodes):
+                angle = (i / max(1, n2-1)) * np.pi - np.pi/2
+                x = 1.0 + arc_radius * np.cos(angle)
+                y = arc_radius * np.sin(angle)
+                pos[n] = (x, y)
+        elif len(unique_chains) == 1:
+            # Single chain: circular layout
+            nodes = list(G.nodes())
+            n = len(nodes)
+            for i, n_id in enumerate(nodes):
+                angle = (i / n) * 2 * np.pi
+                r = 1.0
+                x = r * np.cos(angle)
+                y = r * np.sin(angle)
+                pos[n_id] = (x, y)
+        else:
+            # More than two chains: arrange each as a leaf/arc around a circle
+            n_chains = len(unique_chains)
+            for idx, chain in enumerate(unique_chains):
+                nodes = chain_to_nodes[chain]
+                n = len(nodes)
+                center_angle = (idx / n_chains) * 2 * np.pi
+                center_x = 1.2 * np.cos(center_angle)
+                center_y = 1.2 * np.sin(center_angle)
+                for i, n_id in enumerate(nodes):
+                    angle = (i / max(1, n-1)) * np.pi - np.pi/2
+                    r = 0.5
+                    x = center_x + r * np.cos(angle)
+                    y = center_y + r * np.sin(angle)
+                    pos[n_id] = (x, y)
+        # Draw nodes as large circles with AA color and black border
+        for n in G.nodes():
+            x, y = pos[n]
+            resname = node_resname[n]
+            fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
+            circ = mpatches.Circle((x, y), radius=(node_size/20000), facecolor=fill_color, edgecolor='black', linewidth=2.5, zorder=2)
+            ax.add_patch(circ)
+        # Draw node labels centered, with white outline
         for n in G.nodes():
             x, y = pos[n]
             chain = node_chain.get(n, '')
             aa = node_resname.get(n, 'UNK')
             num = node_resnum.get(n, '')
             label_text = f"{chain}\n{aa}\n{num}"
-            text = ax.text(x, y, label_text, fontsize=self.font_size, fontweight='bold', ha='center', va='center', color='black', zorder=4, linespacing=1.1)
+            text = ax.text(x, y, label_text, fontsize=font_size, ha='center', va='center', color='black', zorder=4, linespacing=1.1, fontname='Helvetica')
             text.set_path_effects([
                 path_effects.Stroke(linewidth=3, foreground='white'),
                 path_effects.Normal()
             ])
-        # Draw edges as curves (arcs) and place labels at arc midpoints
-        edge_count = {}
-        for n1, n2 in G.edges():
-            key = tuple(sorted([n1, n2]))
-            edge_count[key] = edge_count.get(key, 0) + 1
-        edge_parallel_idx = {}
-        for key in edge_count:
-            edge_parallel_idx[key] = 0
-        for idx, (n1, n2) in enumerate(G.edges()):
+        # Draw edges by interaction type, with legend
+        legend_handles = []
+        for interaction_type, style in INTERACTION_STYLES.items():
+            edges = [(u, v) for u, v, d in G.edges(data=True) if d.get('type') == interaction_type]
+            if edges:
+                nx.draw_networkx_edges(
+                    G, pos, edgelist=edges, edge_color=style['color'], style=style['style'], width=style['width'], ax=ax
+                )
+                legend_handles.append(
+                    mlines.Line2D([], [], color=style['color'], linestyle=style['style'], linewidth=style['width'], label=style['label'])
+                )
+        # Draw occupancy labels at edge midpoints, offset to avoid overlap
+        for (n1, n2), label in edge_labels.items():
             x1, y1 = pos[n1]
             x2, y2 = pos[n2]
-            key = tuple(sorted([n1, n2]))
-            # Alternate curvature for parallel edges
-            n_parallel = edge_count[key]
-            parallel_idx = edge_parallel_idx[key]
-            edge_parallel_idx[key] += 1
-            # Curvature: alternate sign and increase with index
-            base_curvature = 0.3
-            if n_parallel == 1:
-                curvature = 0
-            else:
-                sign = (-1) ** parallel_idx
-                curvature = sign * base_curvature * (1 + parallel_idx // 2)
-            # Draw the curved edge
-            arrow = FancyArrowPatch((x1, y1), (x2, y2),
-                                   connectionstyle=f"arc3,rad={curvature}",
-                                   arrowstyle='-', color='gray', linewidth=2, zorder=1)
-            ax.add_patch(arrow)
-            # Find the label (occupancy)
-            label = edge_labels.get((n1, n2), edge_labels.get((n2, n1), ''))
-            if label:
-                # Place label at the curve's midpoint (approximate)
-                # Compute control point for the arc
-                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-                dx, dy = x2 - x1, y2 - y1
-                norm = np.sqrt(dx**2 + dy**2)
-                if norm == 0:
-                    norm = 1
-                # Perpendicular offset for the arc
-                cx = mx - curvature * dy / norm
-                cy = my + curvature * dx / norm
-                # Place label at the midpoint of the arc
-                label_x = (x1 + x2 + 2 * cx) / 4
-                label_y = (y1 + y2 + 2 * cy) / 4
-                ax.text(label_x, label_y, label, color='purple', fontsize=self.font_size+1,
-                        fontweight='bold', ha='center', va='center',
-                        bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'))
-        plt.title(title, fontsize=18, fontweight='bold')
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            # Offset perpendicular to edge
+            dx, dy = x2 - x1, y2 - y1
+            norm = np.sqrt(dx**2 + dy**2)
+            if norm == 0:
+                norm = 1
+            offset = 0.08
+            ox = -offset * dy / norm
+            oy = offset * dx / norm
+            label_x = mx + ox
+            label_y = my + oy
+            ax.text(label_x, label_y, label, color='purple', fontsize=font_size-1, ha='center', va='center', bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'), fontname='Helvetica')
+        # Add professional legend
+        if legend_handles:
+            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=font_size, frameon=True, prop={'family': 'Helvetica'})
+        plt.title(title, fontsize=font_size+8, fontname='Helvetica')
         ax.set_aspect('equal')
         plt.axis('off')
-        plt.tight_layout()
-        if legend_handles:
-            plt.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=2, fontsize=13, frameon=True)
+        plt.tight_layout(rect=[0, 0.05, 1, 0.97])  # Add extra bottom/top margin
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         self.logger.info(f"✅ Network plot saved to {output_file}")
 
     def plot_network(self, interactions: List[Dict[str, Any]], output_file: str, title: str = "Protein-Protein Interaction Network"):
+        r"""
+        Plot a single-type PPI network.
+
+        :param interactions: List of interaction dicts
+        :type interactions: List[Dict[str, Any]]
+        :param output_file: Output file path
+        :type output_file: str
+        :param title: Plot title
+        :type title: str
+        :return: None
+        :rtype: None
+        """
+        MAX_PER_TYPE_EDGES = 30
+        if len(interactions) > MAX_PER_TYPE_EDGES:
+            self.logger.info(f"Too many interactions ({len(interactions)}) for {title}; skipping plot for clarity.")
+            return
         if not interactions:
             self.logger.info(f"⚠️ No interactions found. Skipping plot: {output_file}")
             return
@@ -349,6 +262,16 @@ class PPIPlotter:
         self._draw_ppi_network(G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, title)
 
     def plot_consolidated(self, persistent_by_type: Dict[str, List[Dict[str, Any]]], output_file: str):
+        r"""
+        Plot a consolidated PPI network for all interaction types.
+
+        :param persistent_by_type: Dict of interaction type to list of interactions
+        :type persistent_by_type: Dict[str, List[Dict[str, Any]]]
+        :param output_file: Output file path
+        :type output_file: str
+        :return: None
+        :rtype: None
+        """
         import matplotlib.lines as mlines
         G = nx.Graph()
         edge_labels = {}
@@ -394,8 +317,65 @@ class PPIPlotter:
             group2_chains = set()
         group1_nodes = [n for n in G.nodes() if node_chain[n] in group1_chains]
         group2_nodes = [n for n in G.nodes() if node_chain[n] in group2_chains]
+        # Layout: left/right with vertical spread
+        pos = {}
+        y_gap = 0.25
+        for i, node in enumerate(group1_nodes):
+            pos[node] = (-1, i * y_gap - (len(group1_nodes)-1)*y_gap/2)
+        for i, node in enumerate(group2_nodes):
+            pos[node] = (1, i * y_gap - (len(group2_nodes)-1)*y_gap/2)
+        # Draw group outlines (convex hull) for each group
+        for group_nodes, color in zip([group1_nodes, group2_nodes], [CHAIN_COLORS.get(node_chain[n], CHAIN_COLORS['default']) for n in [group1_nodes[0], group2_nodes[0]] if len(group1_nodes) > 0 and len(group2_nodes) > 0]):
+            if len(group_nodes) >= 3:
+                points = np.array([pos[n] for n in group_nodes])
+                if len(np.unique(points[:, 0])) > 1 and len(np.unique(points[:, 1])) > 1:
+                    hull = ConvexHull(points)
+                    hull_pts = points[hull.vertices]
+                    poly = mpatches.Polygon(hull_pts, closed=True, facecolor=color, alpha=0.15, edgecolor=color, linewidth=2, zorder=0)
+                    plt.gca().add_patch(poly)
+        # Draw nodes as perfect circles with AA color fill and AA color border
+        node_size = self.node_size
+        for node in G.nodes():
+            x, y = pos[node]
+            resname = node_resname[node]
+            fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
+            border_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
+            circ = mpatches.Circle((x, y), radius=(node_size/20000), facecolor=fill_color, edgecolor=border_color, linewidth=3, zorder=2)
+            plt.gca().add_patch(circ)
+        # Custom node labels: all centered and inside the node, with white outline for contrast
+        for node in G.nodes():
+            x, y = pos[node]
+            chain = node_chain[node]
+            aa = node_resname[node]
+            num = node_resnum[node]
+            label_text = f"{chain}\n{aa}\n{num}"
+            text = plt.gca().text(x, y, label_text, fontsize=12, ha='center', va='center', color='black', zorder=4, linespacing=1.1, fontname='Helvetica')
+            text.set_path_effects([
+                path_effects.Stroke(linewidth=3, foreground='white'),
+                path_effects.Normal()
+            ])
+        # Draw edges by interaction type
         legend_handles = []
-        self._draw_ppi_network(G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, "Consolidated Protein-Protein Interaction Diagram", group1_nodes, group2_nodes, legend_handles)
+        for interaction_type, style in INTERACTION_STYLES.items():
+            edges = [(u, v) for u, v, d in G.edges(data=True) if d.get('type') == interaction_type]
+            if edges:
+                nx.draw_networkx_edges(
+                    G, pos, edgelist=edges, edge_color=style['color'], style=style['style'], width=style['width'], ax=plt.gca()
+                )
+                legend_handles.append(
+                    mlines.Line2D([], [], color=style['color'], linestyle=style['style'], linewidth=style['width'], label=style['label'])
+                )
+        # Draw occupancy labels
+        if edge_labels:
+            nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='purple', font_size=13, label_pos=0.5, ax=plt.gca())
+        plt.title("Consolidated Protein-Protein Interaction Diagram", fontsize=18, fontname='Helvetica')
+        plt.axis('off')
+        plt.tight_layout()
+        if legend_handles:
+            plt.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=2, fontsize=13, frameon=True, prop={'family': 'Helvetica'})
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"✅ Network plot saved to {output_file}")
 
 # --- CLI and Main ---
 def submit_job(args, host, jobname):
@@ -429,16 +409,104 @@ def submit_job(args, host, jobname):
     job = jobcontrol.launch_job(cmd)
     return job
 
+def test_schrodinger_ppi_analyzer(cms_file, traj_file, logger=None):
+    r"""
+    Run Schrodinger's ProtProtInter analyzer and print a summary of results.
+
+    :param cms_file: Path to the .cms structure file
+    :type cms_file: str
+    :param traj_file: Path to the trajectory file or directory
+    :type traj_file: str
+    :param logger: Logger for output (optional)
+    :type logger: logging.Logger or None
+    :return: None
+    :rtype: None
+    """
+    try:
+        from schrodinger.application.desmond.packages import analysis, topo, traj
+    except ImportError:
+        print("[ERROR] Schrodinger modules not available. Cannot run analyzer test.")
+        return
+    import collections
+    cms_file = str(cms_file)
+    traj_file = str(traj_file)
+    print("\n[INFO] Running Schrodinger ProtProtInter analyzer test...")
+    msys_model, cms_model = topo.read_cms(cms_file)
+    tr = traj.read_traj(traj_file)
+    analyzer = analysis.ProtProtInter(msys_model, cms_model, "protein")
+    results = analysis.analyze(tr, analyzer)
+    print("[DEBUG] Raw analyzer results:", results)
+    summary = {}
+    if isinstance(results, dict):
+        for interaction_type, pairs in results.items():
+            summary[interaction_type] = len(pairs)
+    else:
+        print(f"[ERROR] Unexpected analyzer result type: {type(results)}")
+    print("\nInteraction summary (total across all frames):")
+    for interaction_type, count in summary.items():
+        print(f"  {interaction_type}: {count} interactions")
+        # Print a few example pairs
+        pairs = results.get(interaction_type, {})
+        for i, (pair, frame_count) in enumerate(pairs.items()):
+            if i < 3:
+                print(f"    {pair}: {frame_count} frames")
+        if len(pairs) > 3:
+            print("    ...")
+    if logger:
+        logger.info(f"Schrodinger analyzer summary: {summary}")
+    print("[INFO] Schrodinger analyzer test complete.\n")
+
+def run_ppi_analysis_with_schrodinger(cms_file, traj_file, logger=None):
+    r"""
+    Run Schrodinger's ProtProtInter analyzer and return the summary dictionary.
+
+    :param cms_file: Path to the .cms structure file
+    :type cms_file: str
+    :param traj_file: Path to the trajectory file or directory
+    :type traj_file: str
+    :param logger: Logger for output (optional)
+    :type logger: logging.Logger or None
+    :return: Dictionary mapping interaction types to residue pair/frame count dicts
+    :rtype: dict
+    """
+    try:
+        from schrodinger.application.desmond.packages import analysis, topo, traj
+    except ImportError:
+        msg = "[ERROR] Schrodinger modules not available. Cannot run analyzer."
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return None
+    cms_file = str(cms_file)
+    traj_file = str(traj_file)
+    msys_model, cms_model = topo.read_cms(cms_file)
+    tr = traj.read_traj(traj_file)
+    analyzer = analysis.ProtProtInter(msys_model, cms_model, "protein")
+    results = analysis.analyze(tr, analyzer)
+    if not isinstance(results, dict):
+        msg = f"[ERROR] Unexpected analyzer result type: {type(results)}"
+        if logger:
+            logger.error(msg)
+        else:
+            print(msg)
+        return None
+    return results
 
 def main():
     r"""
     Main function for protein-protein PPI analysis and visualization (Schrödinger style).
     Supports Schrodinger job control and robust logging.
     Outputs all results, logs, and raw data to a dedicated output directory.
+
+    :return: None
+    :rtype: None
     """
     from schrodinger.structure import StructureReader
     from schrodinger.application.desmond.packages import traj
     import json
+    # Configurable threshold for consolidated plot
+    MAX_CONSOLIDATED_EDGES = 30
     parser = argparse.ArgumentParser(description="Protein-protein PPI analysis and visualization (Schrödinger style)")
     parser.add_argument('--cms', required=True, type=str, help='Path to the Desmond .cms structure file')
     parser.add_argument('--traj', required=True, type=str, help='Path to the trajectory file or directory')
@@ -450,6 +518,7 @@ def main():
     parser.add_argument('--submit-job', action='store_true', help='Submit this script as a Schrodinger job and exit')
     parser.add_argument('--host', type=str, default='localhost', help='Host for job submission (default: localhost)')
     parser.add_argument('--jobname', type=str, default='ppi_analysis', help='Job name for submission (default: ppi_analysis)')
+    parser.add_argument('--test-schrodinger-analyzer', action='store_true', help='Run a test of Schrodinger ProtProtInter analyzer and print summary')
     args = parser.parse_args()
 
     # Create output directory
@@ -477,77 +546,82 @@ def main():
         print(f"Job submitted to host: {args.host} with jobname: {args.jobname}")
         sys.exit(0)
 
-    debug = args.debug
-    cms_file = Path(args.cms)
-    trajectory_file = Path(args.traj)
-    occupancy_threshold = args.occupancy_threshold
-    output_prefix = args.output_prefix
-    # Load structure
-    with StructureReader(str(cms_file)) as reader:
-        structure = next(reader)
+    if getattr(args, 'test_schrodinger_analyzer', False):
+        test_schrodinger_ppi_analyzer(args.cms, args.traj)
+        sys.exit(0)
+
     # Parse chain groups
     def parse_chain_groups(chain_groups_list):
-        return [group.split(',') for group in chain_groups_list]
-    if args.chain_groups is None:
-        print("ℹ️  Please specify --chain-groups using the available chain IDs above.")
+        return [set(group.split(',')) for group in chain_groups_list]
+    if args.chain_groups is None or len(args.chain_groups) < 2:
+        logger.error("You must specify at least two chain groups for inter-chain analysis.")
         sys.exit(1)
     chain_groups = parse_chain_groups(args.chain_groups)
-    # Load trajectory
-    trj_frames = list(traj.read_traj(str(trajectory_file)))
-    if args.max_frames is not None:
-        trj_frames = trj_frames[:args.max_frames]
-    max_frames = len(trj_frames)
-    analyzer = PPIAnalyzer(structure, chain_groups, logger)
-    plotter = PPIPlotter(logger)
+    group1, group2 = chain_groups[0], chain_groups[1]
+    def get_chain(res_id):
+        # res_id is like 'A:GLU_146'
+        return res_id.split(':')[0]
+    logger.info("Using Schrodinger ProtProtInter analyzer for PPI analysis.")
+    ppi_summary = run_ppi_analysis_with_schrodinger(args.cms, args.traj, logger)
+    if ppi_summary is None:
+        logger.error("Schrodinger analyzer failed. Exiting.")
+        sys.exit(1)
+    # Build persistent_by_type as before
     persistent_by_type = {}
-    INTERACTION_TYPES = [
-        ('hydrogen_bond', 'analyze_hydrogen_bonds'),
-        ('salt_bridge', 'analyze_salt_bridges'),
-        ('pi_pi', 'analyze_pi_pi'),
-        ('pi_cation', 'analyze_pi_cation'),
-    ]
-    for interaction_type, method_name in INTERACTION_TYPES:
-        interaction_frames = defaultdict(set)
-        interaction_details = {}
-        for i in range(max_frames):
-            frame = trj_frames[i]
-            frame_structure = structure.copy()
-            positions = frame.pos()
-            for j, atom in enumerate(frame_structure.atom):
-                if j < len(positions):
-                    atom.xyz = positions[j]
-            frame_interactions = []
-            for idx, group1 in enumerate(chain_groups):
-                for group2 in chain_groups[idx+1:]:
-                    analyze_func = getattr(analyzer, method_name)
-                    frame_interactions.extend(analyze_func(frame_structure, group1, group2))
-            for interaction in frame_interactions:
-                key = (interaction['donor'], interaction['acceptor']) if 'donor' in interaction else (interaction.get('res1', ''), interaction.get('res2', ''))
-                interaction_frames[key].add(i)
-                if key not in interaction_details:
-                    interaction_details[key] = interaction
-        persistent_interactions = []
-        for key, frames in interaction_frames.items():
-            occupancy = len(frames) / max_frames
-            if occupancy >= occupancy_threshold:
-                inter = dict(interaction_details[key])
-                inter['occupancy'] = occupancy
-                persistent_interactions.append(inter)
-        persistent_by_type[interaction_type] = persistent_interactions
-        logger.info(f"\n=== Consistent {interaction_type.replace('_', ' ').title()}s (occupancy ≥ {occupancy_threshold*100:.0f}%): ===")
-        for inter in persistent_interactions:
-            logger.info(str(inter))
-        logger.info(f"\n✅ Found {len(persistent_interactions)} consistent {interaction_type.replace('_', ' ')} interactions across {max_frames} frames.")
+    total_frames = None
+    for pairs in ppi_summary.values():
+        for count in pairs.values():
+            if total_frames is None or count > total_frames:
+                total_frames = count
+    if total_frames is None:
+        total_frames = 1
+    for interaction_type, pairs in ppi_summary.items():
+        interactions = []
+        for (res1, res2), count in pairs.items():
+            chain1 = get_chain(res1)
+            chain2 = get_chain(res2)
+            if ((chain1 in group1 and chain2 in group2) or (chain2 in group1 and chain1 in group2)):
+                occupancy = count / total_frames
+                interactions.append({
+                    'res1': res1,
+                    'res2': res2,
+                    'occupancy': occupancy,
+                    'type': interaction_type
+                })
+        filtered_interactions = [inter for inter in interactions if inter['occupancy'] >= args.occupancy_threshold]
+        persistent_by_type[interaction_type] = filtered_interactions
+    # Now group H-bond subtypes (excluding hbond_self)
+    HBOND_SUBTYPES = {'hbond_bb', 'hbond_ss', 'hbond_sb', 'hbond_bs'}
+    grouped_persistent_by_type = {}
+    for interaction_type, interactions in persistent_by_type.items():
+        if interaction_type in HBOND_SUBTYPES:
+            grouped_persistent_by_type.setdefault('hydrogen_bond', []).extend(interactions)
+        elif interaction_type == 'hbond_self':
+            continue
+        else:
+            grouped_persistent_by_type[interaction_type] = interactions
+    # Plot grouped per-type networks (skip H-bond subtypes)
+    plotter = PPIPlotter(logger)
+    for interaction_type, interactions in grouped_persistent_by_type.items():
+        if interaction_type != 'hydrogen_bond' and interaction_type not in INTERACTION_STYLES:
+            logger.warning(f"Skipping unknown interaction type: {interaction_type}")
+            continue
         plotter.plot_network(
-            persistent_interactions,
-            output_file=str(output_dir / f"{output_prefix}_interactions_{interaction_type}.png"),
-            title=f"{interaction_type.replace('_', ' ').title()} Interactions"
+            interactions,
+            output_file=str(output_dir / f"{args.output_prefix}_interactions_{interaction_type}.png"),
+            title=f"{interaction_type.replace('_', ' ').replace('-', ' ').title()} Interactions"
         )
-    plotter.plot_consolidated(persistent_by_type, output_file=str(output_dir / f"{output_prefix}_consolidated.png"))
+    # Plot consolidated network only if number of unique pairs is within threshold
+    total_pairs = sum(len(interactions) for interactions in grouped_persistent_by_type.values())
+    if total_pairs <= MAX_CONSOLIDATED_EDGES:
+        plotter.plot_consolidated(grouped_persistent_by_type, output_file=str(output_dir / f"{args.output_prefix}_consolidated.png"))
+    else:
+        logger.info(f"Too many interactions ({total_pairs}); skipping consolidated plot for clarity.")
     # Save persistent interaction data as JSON
     with open(output_dir / "persistent_interactions.json", "w") as f:
-        json.dump(persistent_by_type, f, indent=2)
+        json.dump(grouped_persistent_by_type, f, indent=2)
     logger.info("\n🎉 Analysis completed successfully! All results are in: %s", output_dir)
+    return
 
 if __name__ == "__main__":
     main()

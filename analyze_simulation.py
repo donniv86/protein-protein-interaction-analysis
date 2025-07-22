@@ -21,6 +21,9 @@ import matplotlib.pyplot as plt
 import networkx as nx
 from collections import defaultdict, Counter
 from typing import List, Dict, Tuple, Any
+from ppi_interaction_diagram import consolidated_ppi_diagram
+import matplotlib.patheffects as path_effects
+import matplotlib.patches as mpatches
 
 # Schrodinger imports
 from schrodinger.structure import StructureReader
@@ -33,6 +36,17 @@ except ImportError:
     import logging
     logging.basicConfig(format='[%(levelname)s] %(message)s', level=logging.INFO)
     logger = logging.getLogger("PPIAnalysis")
+
+# Schrödinger professional amino acid color scheme
+AMINO_ACID_COLORS = {
+    'ALA': '#87CEEB', 'VAL': '#4682B4', 'LEU': '#1E90FF', 'ILE': '#0000CD',
+    'MET': '#4169E1', 'PHE': '#191970', 'TRP': '#000080', 'PRO': '#483D8B',
+    'GLY': '#98FB98', 'SER': '#90EE90', 'THR': '#32CD32', 'CYS': '#228B22',
+    'TYR': '#006400', 'ASN': '#20B2AA', 'GLN': '#48D1CC',
+    'ASP': '#FFB6C1', 'GLU': '#FF69B4',
+    'LYS': '#9370DB', 'ARG': '#8A2BE2', 'HIS': '#4B0082',
+    'UNK': '#C0C0C0',
+}
 
 # --- Constants (from Schrodinger analysis.py) ---
 HBOND_CUTOFF = 2.8
@@ -234,47 +248,75 @@ def analyze_hydrophobic(structure, group1, group2):
     return interactions
 
 def plot_protein_protein_network(interactions, output_file="ppi_network.png"):
-    """
-    Create a 2D network plot of protein-protein interactions.
-    :param interactions: List of dicts with keys for residue pairs (e.g., 'donor'/'acceptor' or 'res1'/'res2')
-    :param output_file: Output image file name
-    """
+    if not interactions:
+        print(f"⚠️ No interactions found. Skipping plot: {output_file}")
+        return
     G = nx.Graph()
     edge_labels = {}
+    node_chain = {}
+    node_resname = {}
+    node_resnum = {}
     for inter in interactions:
         if 'donor' in inter and 'acceptor' in inter:
             n1, n2 = inter['donor'], inter['acceptor']
         elif 'res1' in inter and 'res2' in inter:
             n1, n2 = inter['res1'], inter['res2']
         else:
-            continue  # skip if keys are missing
-        G.add_node(n1, chain=n1.split(':')[0])
-        G.add_node(n2, chain=n2.split(':')[0])
+            continue
+        for n in [n1, n2]:
+            if n not in G:
+                try:
+                    chain, rest = n.split(':')
+                    resname = rest[:3]
+                    resnum = rest[3:]
+                except Exception:
+                    chain, resname, resnum = ' ', 'UNK', ''
+                node_chain[n] = chain
+                node_resname[n] = resname
+                node_resnum[n] = resnum
+                G.add_node(n)
         G.add_edge(n1, n2, type=inter['type'])
-        # Add occupancy label if available
         if 'occupancy' in inter:
             percent = int(round(inter['occupancy'] * 100))
             edge_labels[(n1, n2)] = f"{percent}%"
-
-    # Layout: separate chains on left/right
-    chains = list({G.nodes[n]['chain'] for n in G.nodes})
+    # Layout: left/right with vertical spread
+    chains = list({node_chain[n] for n in G.nodes})
     pos = {}
     chain_y = {c: 0 for c in chains}
     for node in G.nodes():
-        chain = G.nodes[node]['chain']
+        chain = node_chain[node]
         x = -1 if chain == chains[0] else 1
         y = chain_y[chain]
         pos[node] = (x, y)
         chain_y[chain] += 1
-
-    plt.figure(figsize=(10, 8))
-    nx.draw_networkx_nodes(G, pos, node_color='skyblue', node_size=800, edgecolors='black')
-    nx.draw_networkx_labels(G, pos, font_size=8)
-    nx.draw_networkx_edges(G, pos, edge_color='gray', width=2)
-    # Draw occupancy labels at edge midpoints
+    plt.figure(figsize=(12, 10))
+    ax = plt.gca()
+    node_size = 2200
+    # Draw nodes as perfect circles with AA color fill and AA color border
+    for node in G.nodes():
+        x, y = pos[node]
+        resname = node_resname[node]
+        fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
+        border_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
+        circ = mpatches.Circle((x, y), radius=(node_size/20000), facecolor=fill_color, edgecolor=border_color, linewidth=3, zorder=2)
+        ax.add_patch(circ)
+    # Custom node labels: all centered and inside the node, with white outline for contrast
+    for node in G.nodes():
+        x, y = pos[node]
+        chain = node_chain[node]
+        aa = node_resname[node]
+        num = node_resnum[node]
+        label_text = f"{chain}\n{aa}\n{num}"
+        text = ax.text(x, y, label_text, fontsize=12, fontweight='bold', ha='center', va='center', color='black', zorder=4, linespacing=1.1)
+        text.set_path_effects([
+            path_effects.Stroke(linewidth=3, foreground='white'),
+            path_effects.Normal()
+        ])
+    # Draw edges and occupancy labels
+    nx.draw_networkx_edges(G, pos, edge_color='gray', width=2, ax=ax)
     if edge_labels:
-        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='red', font_size=10, label_pos=0.5)
-    plt.title("Protein-Protein Interaction Network")
+        nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='purple', font_size=13, label_pos=0.5, ax=ax)
+    plt.title("Protein-Protein Interaction Network", fontsize=16, fontweight='bold')
     plt.axis('off')
     plt.tight_layout()
     plt.savefig(output_file, dpi=300)
@@ -434,6 +476,8 @@ def main():
         plot_protein_protein_network(persistent_interactions, output_file=f"ppi_network_{interaction_type}.png")
         if debug:
             logger.info(f"[DEBUG] Finished analysis and plotting for {interaction_type}.")
+
+    consolidated_ppi_diagram(persistent_by_type, output_file="ppi_consolidated.png")
 
 if __name__ == "__main__":
     main()

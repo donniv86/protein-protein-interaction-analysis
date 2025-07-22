@@ -137,3 +137,46 @@ test*
 
 # Allow ppi_analyzer.py to be tracked
 !ppi_analyzer.py
+
+# Desmond trajectory files and folders
+*.dtr
+*.trj
+*trj/
+
+# Ignore all output generated from scripts
+*.json
+*.csv
+*.txt
+*.log
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.gif
+output/
+results/
+report/
+*.out
+*.tmp
+*.dat
+*.tsv
+*.pdf
+*.xlsx
+*.xls
+*.tsv
+*.gz
+*.zip
+*.tar
+*.tar.gz
+*.bak
+*.old
+*.swp
+*.swo
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.maegz
+ppi_results/
