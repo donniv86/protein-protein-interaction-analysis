@@ -1,38 +1,59 @@
 #!/usr/bin/env python3
 """
-ppi_analysis.py
-Professional script for protein-protein non-bonding interaction analysis and visualization.
-Combines analysis and plotting in a single, reproducible, developer-friendly module.
+ppi_analysis.py - Professional Protein-Protein Interaction Analysis and Visualization
+
+This script provides functionality to:
+- Analyze protein-protein interactions using Schrodinger Suite
+- Generate professional network visualizations with consistent styling
+- Support Schrodinger job control for remote execution
+- Provide comprehensive CLI interface with robust error handling
+- Filter interactions by occupancy threshold
+- Create both per-type and consolidated interaction plots
+
+Usage examples:
+- python ppi_analysis.py --cms structure.cms --traj trajectory_dir --chain-groups A,B C,D
+- python ppi_analysis.py --cms structure.cms --traj trajectory_dir --submit-job --host server
+- python ppi_analysis.py --cms structure.cms --traj trajectory_dir --occupancy-threshold 0.3
+
+Copyright Schrodinger, LLC. All rights reserved.
 """
 
+# Standard library imports
 import argparse
-import sys
-import os
-from pathlib import Path
-from collections import defaultdict
-from typing import List, Dict, Any
 import logging
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Dict, Any
 
+# Third-party imports
+import matplotlib
+matplotlib.use('Agg')
+# Set Helvetica as default font for all plots, with robust fallback
+matplotlib.rcParams['font.sans-serif'] = [
+    'Helvetica', 'Arial', 'DejaVu Sans'
+]
+matplotlib.rcParams['font.family'] = 'sans-serif'
+import matplotlib.patches as mpatches
+import matplotlib.patheffects as path_effects
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from matplotlib.patches import FancyArrowPatch
+from scipy.spatial import ConvexHull
+
+# Schrodinger imports
 try:
     from schrodinger.utils import log as schrod_log
     from schrodinger.job import jobcontrol
     SCHRODINGER_AVAILABLE = True
 except ImportError:
     SCHRODINGER_AVAILABLE = False
-    logging.basicConfig(format='[%(levelname)s] %(message)s', level=logging.INFO)
-
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-# Set Helvetica as default font for all plots, with robust fallback
-matplotlib.rcParams['font.sans-serif'] = ['Helvetica', 'Arial', 'DejaVu Sans']
-matplotlib.rcParams['font.family'] = 'sans-serif'
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import matplotlib.patheffects as path_effects
-import networkx as nx
-from scipy.spatial import ConvexHull
-from matplotlib.patches import FancyArrowPatch
+    logging.basicConfig(
+        format='[%(levelname)s] %(message)s',
+        level=logging.INFO
+    )
 
 # Schrodinger color schemes
 AMINO_ACID_COLORS = {
@@ -49,21 +70,133 @@ CHAIN_COLORS = {
     'E': '#FFEAA7', 'F': '#DDA0DD', 'L': '#FFA07A', 'default': '#87CEEB'
 }
 INTERACTION_STYLES = {
-    'hydrogen_bond': {'color': '#2E86AB', 'style': 'dashed', 'width': 2.0, 'label': 'Hydrogen Bond'},
-    'salt_bridge': {'color': '#2E8B57', 'style': 'solid', 'width': 3.0, 'label': 'Salt Bridge'},
-    'pi_pi': {'color': '#8A2BE2', 'style': 'dotted', 'width': 2.5, 'label': 'π-π Stacking'},
-    'pi_cation': {'color': '#FF4500', 'style': 'dashdot', 'width': 2.5, 'label': 'π-Cation'},
+    'hydrogen_bond': {
+        'color': '#2E86AB', 'style': 'dashed', 'width': 2.5,
+        'label': 'Hydrogen Bond'
+    },
+    'salt_bridge': {
+        'color': '#2E8B57', 'style': 'solid', 'width': 3.5,
+        'label': 'Salt Bridge'
+    },
+    'pi_pi': {
+        'color': '#8A2BE2', 'style': 'dotted', 'width': 3.0,
+        'label': 'π-π Stacking'
+    },
+    'pi_cation': {
+        'color': '#FF4500', 'style': 'dashdot', 'width': 3.0,
+        'label': 'π-Cation'
+    },
 }
 
 # Extend INTERACTION_STYLES to include analyzer aliases
 INTERACTION_STYLES.update({
     'salt-bridge': INTERACTION_STYLES.get('salt_bridge', {
-        'color': '#2E8B57', 'style': 'solid', 'width': 3.0, 'label': 'Salt Bridge'}),
+        'color': '#2E8B57', 'style': 'solid', 'width': 3.0,
+        'label': 'Salt Bridge'
+    }),
     'pi-pi': INTERACTION_STYLES.get('pi_pi', {
-        'color': '#8A2BE2', 'style': 'dotted', 'width': 2.5, 'label': 'π-π Stacking'}),
+        'color': '#8A2BE2', 'style': 'dotted', 'width': 2.5,
+        'label': 'π-π Stacking'
+    }),
     'pi-cat': INTERACTION_STYLES.get('pi_cation', {
-        'color': '#FF4500', 'style': 'dashdot', 'width': 2.5, 'label': 'π-Cation'}),
+        'color': '#FF4500', 'style': 'dashdot', 'width': 2.5,
+        'label': 'π-Cation'
+    }),
 })
+
+# --- Input Validation Functions ---
+def validate_files(cms_file, traj_file, logger):
+    """
+    Validate input files exist and are accessible.
+
+    :param cms_file: Path to CMS file
+    :type cms_file: str
+    :param traj_file: Path to trajectory file
+    :type traj_file: str
+    :param logger: Logger instance
+    :type logger: logging.Logger
+    :return: True if validation passes, False otherwise
+    :rtype: bool
+    """
+    cms_path = Path(cms_file)
+    traj_path = Path(traj_file)
+
+    if not cms_path.exists():
+        logger.error(f"CMS file not found: {cms_file}")
+        return False
+
+    if not traj_path.exists():
+        logger.error(f"Trajectory file not found: {traj_file}")
+        return False
+
+    if not cms_path.is_file():
+        logger.error(f"CMS path is not a file: {cms_file}")
+        return False
+
+    if not traj_path.is_file() and not traj_path.is_dir():
+        logger.error(f"Trajectory path is not a file or directory: {traj_file}")
+        return False
+
+    logger.info("✅ Input file validation passed")
+    return True
+
+def validate_chain_groups(chain_groups, logger):
+    """
+    Validate chain group specifications.
+
+    :param chain_groups: List of chain group strings
+    :type chain_groups: List[str]
+    :param logger: Logger instance
+    :type logger: logging.Logger
+    :return: True if validation passes, False otherwise
+    :rtype: bool
+    """
+    if not chain_groups or len(chain_groups) < 2:
+        logger.error("At least two chain groups must be specified")
+        return False
+
+    for i, group in enumerate(chain_groups):
+        if not group.strip():
+            logger.error(f"Chain group {i+1} is empty")
+            return False
+
+        chains = group.split(',')
+        for chain in chains:
+            if not chain.strip():
+                logger.error(f"Empty chain ID in group {i+1}")
+                return False
+
+    logger.info("✅ Chain group validation passed")
+    return True
+
+def validate_parameters(args, logger):
+    """
+    Validate all input parameters.
+
+    :param args: Parsed arguments
+    :type args: argparse.Namespace
+    :param logger: Logger instance
+    :type logger: logging.Logger
+    :return: True if validation passes, False otherwise
+    :rtype: bool
+    """
+    # Validate occupancy threshold
+    if not (0.0 <= args.occupancy_threshold <= 1.0):
+        logger.error(
+            f"Occupancy threshold must be between 0.0 and 1.0, got: "
+            f"{args.occupancy_threshold}"
+        )
+        return False
+
+    # Validate max_frames if specified
+    if args.max_frames is not None and args.max_frames <= 0:
+        logger.error(
+            f"Max frames must be positive, got: {args.max_frames}"
+        )
+        return False
+
+    logger.info("✅ Parameter validation passed")
+    return True
 
 # --- Plotting Class ---
 class PPIPlotter:
@@ -71,8 +204,10 @@ class PPIPlotter:
     Plot protein-protein interaction networks with uniform, professional style.
     Ensures consistent node size, font size, and layout for all interaction types.
 
-    :param logger: Logger instance
+    :param logger: Logger instance for output messages
     :type logger: logging.Logger
+    :return: None
+    :rtype: None
     """
     def __init__(self, logger):
         self.logger = logger
@@ -82,9 +217,40 @@ class PPIPlotter:
         self.arc_radius = 0.8
         self.layout_seed = 42  # Fixed seed for reproducible layouts
 
-    def _draw_ppi_network(self, G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, title, group1_nodes=None, group2_nodes=None, legend_handles=None):
+    def _drawPpiNetwork(self, graph, node_chain, node_resname, node_resnum,
+                       edges_by_type, edge_labels, output_file, title,
+                       group1_nodes=None, group2_nodes=None,
+                       legend_handles=None):
+        """
+        Draw protein-protein interaction network with professional styling.
+
+        :param graph: NetworkX graph object
+        :type graph: networkx.Graph
+        :param node_chain: Dictionary mapping nodes to chain IDs
+        :type node_chain: Dict[str, str]
+        :param node_resname: Dictionary mapping nodes to residue names
+        :type node_resname: Dict[str, str]
+        :param node_resnum: Dictionary mapping nodes to residue numbers
+        :type node_resnum: Dict[str, str]
+        :param edges_by_type: Dictionary mapping interaction types to edge lists
+        :type edges_by_type: Dict[str, List[tuple]]
+        :param edge_labels: Dictionary mapping edges to labels
+        :type edge_labels: Dict[tuple, str]
+        :param output_file: Output file path
+        :type output_file: str
+        :param title: Plot title
+        :type title: str
+        :param group1_nodes: First group of nodes (optional)
+        :type group1_nodes: List[str] or None
+        :param group2_nodes: Second group of nodes (optional)
+        :type group2_nodes: List[str] or None
+        :param legend_handles: Legend handles (optional)
+        :type legend_handles: List or None
+        :return: None
+        :rtype: None
+        """
         import matplotlib.lines as mlines
-        n_nodes = len(G.nodes())
+        n_nodes = len(graph.nodes())
         # Dynamic adjustment based on node count
         if n_nodes <= 15:
             node_size, font_size, arc_radius = 2000, 12, 0.7
@@ -97,10 +263,13 @@ class PPIPlotter:
             fig_size = (16, 14)
         fig, ax = plt.subplots(figsize=fig_size)
         # Determine unique chains and group nodes by chain
-        unique_chains = sorted(set(node_chain[n] for n in G.nodes()))
-        chain_to_nodes = {chain: [n for n in G.nodes() if node_chain[n] == chain] for chain in unique_chains}
+        unique_chains = sorted(set(node_chain[n] for n in graph.nodes()))
+        chain_to_nodes = {
+            chain: [n for n in graph.nodes() if node_chain[n] == chain]
+            for chain in unique_chains
+        }
         pos = {}
-        # Schrodinger-style layout: two chains as left/right "leaves"/arcs
+        # Use left/right layout for two chains (same as consolidated plot)
         if len(unique_chains) == 2:
             chain1, chain2 = unique_chains[0], unique_chains[1]
             chain1_nodes = chain_to_nodes[chain1]
@@ -113,20 +282,18 @@ class PPIPlotter:
                     return 0
             chain1_nodes.sort(key=resnum_key)
             chain2_nodes.sort(key=resnum_key)
-            n1, n2 = len(chain1_nodes), len(chain2_nodes)
-            for i, n in enumerate(chain1_nodes):
-                angle = (i / max(1, n1-1)) * np.pi - np.pi/2  # from -90 to +90 deg
-                x = -1.0 + arc_radius * np.cos(angle)
-                y = arc_radius * np.sin(angle)
-                pos[n] = (x, y)
-            for i, n in enumerate(chain2_nodes):
-                angle = (i / max(1, n2-1)) * np.pi - np.pi/2
-                x = 1.0 + arc_radius * np.cos(angle)
-                y = arc_radius * np.sin(angle)
-                pos[n] = (x, y)
+
+            # Position nodes in left/right layout
+            y_gap = 1.2  # Spacing between nodes
+            x_separation = 3.0  # Separation between chains
+
+            for i, node in enumerate(chain1_nodes):
+                pos[node] = (-x_separation, i * y_gap - (len(chain1_nodes)-1)*y_gap/2)
+            for i, node in enumerate(chain2_nodes):
+                pos[node] = (x_separation, i * y_gap - (len(chain2_nodes)-1)*y_gap/2)
         elif len(unique_chains) == 1:
             # Single chain: circular layout
-            nodes = list(G.nodes())
+            nodes = list(graph.nodes())
             n = len(nodes)
             for i, n_id in enumerate(nodes):
                 angle = (i / n) * 2 * np.pi
@@ -149,66 +316,124 @@ class PPIPlotter:
                     x = center_x + r * np.cos(angle)
                     y = center_y + r * np.sin(angle)
                     pos[n_id] = (x, y)
-        # Draw nodes as large circles with AA color and black border
-        for n in G.nodes():
-            x, y = pos[n]
+        # Draw nodes using NetworkX optimized functions with larger size
+        node_colors = []
+        node_sizes = []
+
+        for n in graph.nodes():
             resname = node_resname[n]
             fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
-            circ = mpatches.Circle((x, y), radius=(node_size/20000), facecolor=fill_color, edgecolor='black', linewidth=2.5, zorder=2)
-            ax.add_patch(circ)
-        # Draw node labels centered, with white outline
-        for n in G.nodes():
-            x, y = pos[n]
+            node_colors.append(fill_color)
+            node_sizes.append(2000)  # Much larger node size for better text visibility
+
+        # Draw nodes with NetworkX functions for perfect circles
+        nx.draw_networkx_nodes(
+            graph, pos,
+            node_color=node_colors,
+            node_size=node_sizes,
+            edgecolors='black',
+            linewidths=2,
+            alpha=0.9,
+            ax=ax
+        )
+
+        # Draw node labels with proper formatting
+        node_labels = {}
+        for n in graph.nodes():
             chain = node_chain.get(n, '')
             aa = node_resname.get(n, 'UNK')
             num = node_resnum.get(n, '')
-            label_text = f"{chain}\n{aa}\n{num}"
-            text = ax.text(x, y, label_text, fontsize=font_size, ha='center', va='center', color='black', zorder=4, linespacing=1.1, fontname='Helvetica')
-            text.set_path_effects([
-                path_effects.Stroke(linewidth=3, foreground='white'),
-                path_effects.Normal()
-            ])
+            # Format: Chain\nAA\nNumber
+            node_labels[n] = f"{chain}\n{aa}\n{num}"
+
+        # Draw labels with NetworkX function - larger font for better visibility
+        nx.draw_networkx_labels(
+            graph, pos,
+            labels=node_labels,
+            font_size=12,  # Increased font size
+            font_family='Helvetica',
+            font_weight='bold',
+            ax=ax
+        )
         # Draw edges by interaction type, with legend
         legend_handles = []
         for interaction_type, style in INTERACTION_STYLES.items():
-            edges = [(u, v) for u, v, d in G.edges(data=True) if d.get('type') == interaction_type]
+            edges = [
+                (u, v) for u, v, d in graph.edges(data=True)
+                if d.get('type') == interaction_type
+            ]
             if edges:
                 nx.draw_networkx_edges(
-                    G, pos, edgelist=edges, edge_color=style['color'], style=style['style'], width=style['width'], ax=ax
+                    graph, pos, edgelist=edges, edge_color=style['color'],
+                    style=style['style'], width=style['width'], ax=ax
                 )
                 legend_handles.append(
-                    mlines.Line2D([], [], color=style['color'], linestyle=style['style'], linewidth=style['width'], label=style['label'])
+                    mlines.Line2D(
+                        [], [], color=style['color'], linestyle=style['style'],
+                        linewidth=style['width'], label=style['label']
+                    )
                 )
         # Draw occupancy labels at edge midpoints, offset to avoid overlap
         for (n1, n2), label in edge_labels.items():
             x1, y1 = pos[n1]
             x2, y2 = pos[n2]
-            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
             # Offset perpendicular to edge
-            dx, dy = x2 - x1, y2 - y1
-            norm = np.sqrt(dx**2 + dy**2)
+            delta_x, delta_y = x2 - x1, y2 - y1
+            norm = np.sqrt(delta_x**2 + delta_y**2)
             if norm == 0:
                 norm = 1
             offset = 0.08
-            ox = -offset * dy / norm
-            oy = offset * dx / norm
-            label_x = mx + ox
-            label_y = my + oy
-            ax.text(label_x, label_y, label, color='purple', fontsize=font_size-1, ha='center', va='center', bbox=dict(facecolor='white', edgecolor='none', alpha=0.7, boxstyle='round,pad=0.2'), fontname='Helvetica')
+            offset_x = -offset * delta_y / norm
+            offset_y = offset * delta_x / norm
+            label_x = mid_x + offset_x
+            label_y = mid_y + offset_y
+            ax.text(
+                label_x, label_y, label, color='purple',
+                fontsize=font_size-1, ha='center', va='center',
+                bbox=dict(
+                    facecolor='white', edgecolor='none', alpha=0.7,
+                    boxstyle='round,pad=0.2'
+                ), fontname='Helvetica'
+            )
         # Add professional legend
         if legend_handles:
-            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=font_size, frameon=True, prop={'family': 'Helvetica'})
+            ax.legend(
+                handles=legend_handles, loc='upper center',
+                bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=font_size,
+                frameon=True, prop={'family': 'Helvetica'}
+            )
+        # Add chain labels for left/right layout
+        if len(unique_chains) == 2:
+            # Get the y-coordinates for positioning chain labels
+            all_y = [pos[n][1] for n in graph.nodes()]
+            max_y = max(all_y) if all_y else 0
+
+            # Add chain labels above the columns
+            ax.text(-x_separation, max_y + 1.0, f"Chain {chain1}",
+                   fontsize=16, ha='center', fontweight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5",
+                           facecolor=CHAIN_COLORS.get(chain1, CHAIN_COLORS['default']),
+                           alpha=0.3))
+
+            ax.text(x_separation, max_y + 1.0, f"Chain {chain2}",
+                   fontsize=16, ha='center', fontweight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5",
+                           facecolor=CHAIN_COLORS.get(chain2, CHAIN_COLORS['default']),
+                           alpha=0.3))
+
         plt.title(title, fontsize=font_size+8, fontname='Helvetica')
         ax.set_aspect('equal')
-        plt.axis('off')
-        plt.tight_layout(rect=[0, 0.05, 1, 0.97])  # Add extra bottom/top margin
+        ax.set_axis_off()
+        plt.tight_layout(rect=[0, 0.05, 1, 0.97])
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         self.logger.info(f"✅ Network plot saved to {output_file}")
 
-    def plot_network(self, interactions: List[Dict[str, Any]], output_file: str, title: str = "Protein-Protein Interaction Network"):
+    def plotNetwork(self, interactions: List[Dict[str, Any]], output_file: str,
+                   title: str = "Protein-Protein Interaction Network"):
         r"""
-        Plot a single-type PPI network.
+        Plot a single-type PPI network using the same high-quality styling as consolidated plot.
 
         :param interactions: List of interaction dicts
         :type interactions: List[Dict[str, Any]]
@@ -221,49 +446,33 @@ class PPIPlotter:
         """
         MAX_PER_TYPE_EDGES = 30
         if len(interactions) > MAX_PER_TYPE_EDGES:
-            self.logger.info(f"Too many interactions ({len(interactions)}) for {title}; skipping plot for clarity.")
+            self.logger.info(
+                f"Too many interactions ({len(interactions)}) for {title}; "
+                f"skipping plot for clarity."
+            )
             return
         if not interactions:
-            self.logger.info(f"⚠️ No interactions found. Skipping plot: {output_file}")
+            self.logger.info(
+                f"⚠️ No interactions found. Skipping plot: {output_file}"
+            )
             return
-        G = nx.Graph()
-        edge_labels = {}
-        node_chain = {}
-        node_resname = {}
-        node_resnum = {}
-        edges_by_type = {k: [] for k in INTERACTION_STYLES}
-        for inter in interactions:
-            if 'donor' in inter and 'acceptor' in inter:
-                n1, n2 = inter['donor'], inter['acceptor']
-                interaction_type = inter['type']
-            elif 'res1' in inter and 'res2' in inter:
-                n1, n2 = inter['res1'], inter['res2']
-                interaction_type = inter['type']
-            else:
-                continue
-            for n in [n1, n2]:
-                if n not in G:
-                    try:
-                        chain, rest = n.split(':')
-                        resname = rest[:3]
-                        resnum = rest[3:]
-                    except Exception:
-                        chain, resname, resnum = ' ', 'UNK', ''
-                    node_chain[n] = chain
-                    node_resname[n] = resname
-                    node_resnum[n] = resnum
-                    G.add_node(n)
-            G.add_edge(n1, n2, type=interaction_type)
-            edges_by_type.setdefault(interaction_type, []).append((n1, n2))
-            if 'occupancy' in inter:
-                percent = int(round(inter['occupancy'] * 100))
-                edge_labels[(n1, n2)] = f"{percent}%"
-        # Use the same layout and drawing as consolidated
-        self._draw_ppi_network(G, node_chain, node_resname, node_resnum, edges_by_type, edge_labels, output_file, title)
 
-    def plot_consolidated(self, persistent_by_type: Dict[str, List[Dict[str, Any]]], output_file: str):
+        # Create a single-type dictionary for the consolidated plotting method
+        persistent_by_type = {}
+        for inter in interactions:
+            interaction_type = inter.get('type', 'hydrogen_bond')
+            if interaction_type not in persistent_by_type:
+                persistent_by_type[interaction_type] = []
+            persistent_by_type[interaction_type].append(inter)
+
+        # Use the same high-quality plotting method as consolidated
+        # Pass the title to customize the plot title
+        self.plotConsolidated(persistent_by_type, output_file, custom_title=title)
+
+    def plotConsolidated(self, persistent_by_type: Dict[str, List[Dict[str, Any]]],
+                        output_file: str, custom_title: str = None):
         r"""
-        Plot a consolidated PPI network for all interaction types.
+        Plot a consolidated PPI network for all interaction types using NetworkX best practices.
 
         :param persistent_by_type: Dict of interaction type to list of interactions
         :type persistent_by_type: Dict[str, List[Dict[str, Any]]]
@@ -273,109 +482,267 @@ class PPIPlotter:
         :rtype: None
         """
         import matplotlib.lines as mlines
-        G = nx.Graph()
+
+        # Create figure with proper aspect ratio for perfect circles
+        # Adjust figure size based on number of nodes
+        total_nodes = sum(len(interactions) for interactions in persistent_by_type.values())
+        if total_nodes <= 2:
+            fig, ax = plt.subplots(figsize=(10, 8))  # Smaller figure for 2 nodes
+        elif total_nodes <= 5:
+            fig, ax = plt.subplots(figsize=(12, 10))  # Medium figure for few nodes
+        else:
+            fig, ax = plt.subplots(figsize=(16, 12))  # Large figure for many nodes
+        ax.set_aspect('equal')  # CRITICAL: This ensures perfect circles
+
+        graph = nx.Graph()
         edge_labels = {}
-        edge_styles = {}
         node_chain = {}
         node_resname = {}
         node_resnum = {}
         edges_by_type = {k: [] for k in INTERACTION_STYLES}
+
+        # Build the graph
         for interaction_type, interactions in persistent_by_type.items():
-            style = INTERACTION_STYLES.get(interaction_type, INTERACTION_STYLES['hydrogen_bond'])
+            style = INTERACTION_STYLES.get(
+                interaction_type, INTERACTION_STYLES['hydrogen_bond']
+            )
             for inter in interactions:
                 if 'donor' in inter and 'acceptor' in inter:
-                    n1, n2 = inter['donor'], inter['acceptor']
+                    node1, node2 = inter['donor'], inter['acceptor']
                 elif 'res1' in inter and 'res2' in inter:
-                    n1, n2 = inter['res1'], inter['res2']
+                    node1, node2 = inter['res1'], inter['res2']
                 else:
                     continue
-                for n in [n1, n2]:
-                    if n not in G:
+
+                for n in [node1, node2]:
+                    if n not in graph:
                         try:
                             chain, rest = n.split(':')
                             resname = rest[:3]
-                            resnum = rest[3:]
+                            resnum = rest[3:].lstrip('_')  # Remove underscore prefix
                         except Exception:
                             chain, resname, resnum = ' ', 'UNK', ''
                         node_chain[n] = chain
                         node_resname[n] = resname
                         node_resnum[n] = resnum
-                        G.add_node(n)
-                G.add_edge(n1, n2, type=interaction_type)
-                edges_by_type.setdefault(interaction_type, []).append((n1, n2))
-                edge_styles[(n1, n2)] = style
+                        graph.add_node(n)
+
+                graph.add_edge(node1, node2, type=interaction_type)
+                edges_by_type.setdefault(interaction_type, []).append((node1, node2))
+
                 if 'occupancy' in inter:
                     percent = int(round(inter['occupancy'] * 100))
-                    edge_labels[(n1, n2)] = f"{percent}%"
-        # Determine groups for left/right layout
-        unique_chains = sorted(set(node_chain[n] for n in G.nodes()))
-        if len(unique_chains) > 1:
-            group1_chains = set([unique_chains[0]])
-            group2_chains = set(unique_chains[1:])
+                    edge_labels[(node1, node2)] = f"{percent}%"
+
+                # Use left/right layout for two chains
+        unique_chains = sorted(set(node_chain[n] for n in graph.nodes()))
+        if len(unique_chains) >= 2:
+            chain1, chain2 = unique_chains[0], unique_chains[1]
+            chain1_nodes = [n for n in graph.nodes() if node_chain[n] == chain1]
+            chain2_nodes = [n for n in graph.nodes() if node_chain[n] == chain2]
+
+            # Sort nodes by residue number for each chain
+            def resnum_key(n):
+                try:
+                    return int(node_resnum[n])
+                except Exception:
+                    return 0
+
+            chain1_nodes.sort(key=resnum_key)
+            chain2_nodes.sort(key=resnum_key)
+
+            # Position nodes in left/right layout
+            pos = {}
+            y_gap = 1.2  # Spacing between nodes
+
+            # Adjust separation based on number of nodes to prevent cropping
+            total_nodes = len(chain1_nodes) + len(chain2_nodes)
+            if total_nodes <= 2:
+                x_separation = 1.5  # Smaller separation for 2 nodes
+            elif total_nodes <= 5:
+                x_separation = 2.5  # Medium separation for few nodes
+            else:
+                x_separation = 3.0  # Full separation for many nodes
+
+            for i, node in enumerate(chain1_nodes):
+                pos[node] = (-x_separation, i * y_gap - (len(chain1_nodes)-1)*y_gap/2)
+            for i, node in enumerate(chain2_nodes):
+                pos[node] = (x_separation, i * y_gap - (len(chain2_nodes)-1)*y_gap/2)
         else:
-            group1_chains = set([unique_chains[0]])
-            group2_chains = set()
-        group1_nodes = [n for n in G.nodes() if node_chain[n] in group1_chains]
-        group2_nodes = [n for n in G.nodes() if node_chain[n] in group2_chains]
-        # Layout: left/right with vertical spread
-        pos = {}
-        y_gap = 0.25
-        for i, node in enumerate(group1_nodes):
-            pos[node] = (-1, i * y_gap - (len(group1_nodes)-1)*y_gap/2)
-        for i, node in enumerate(group2_nodes):
-            pos[node] = (1, i * y_gap - (len(group2_nodes)-1)*y_gap/2)
-        # Draw group outlines (convex hull) for each group
-        for group_nodes, color in zip([group1_nodes, group2_nodes], [CHAIN_COLORS.get(node_chain[n], CHAIN_COLORS['default']) for n in [group1_nodes[0], group2_nodes[0]] if len(group1_nodes) > 0 and len(group2_nodes) > 0]):
-            if len(group_nodes) >= 3:
-                points = np.array([pos[n] for n in group_nodes])
-                if len(np.unique(points[:, 0])) > 1 and len(np.unique(points[:, 1])) > 1:
-                    hull = ConvexHull(points)
-                    hull_pts = points[hull.vertices]
-                    poly = mpatches.Polygon(hull_pts, closed=True, facecolor=color, alpha=0.15, edgecolor=color, linewidth=2, zorder=0)
-                    plt.gca().add_patch(poly)
-        # Draw nodes as perfect circles with AA color fill and AA color border
-        node_size = self.node_size
-        for node in G.nodes():
-            x, y = pos[node]
+            # Fallback to circular layout for single chain
+            pos = nx.circular_layout(graph, scale=2.0)
+
+        # Draw nodes using NetworkX optimized functions with larger size
+        node_colors = []
+        node_sizes = []
+
+        for node in graph.nodes():
             resname = node_resname[node]
             fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
-            border_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
-            circ = mpatches.Circle((x, y), radius=(node_size/20000), facecolor=fill_color, edgecolor=border_color, linewidth=3, zorder=2)
-            plt.gca().add_patch(circ)
-        # Custom node labels: all centered and inside the node, with white outline for contrast
-        for node in G.nodes():
-            x, y = pos[node]
+            node_colors.append(fill_color)
+
+            # Dynamic node size based on number of nodes
+            total_nodes = len(graph.nodes())
+            if total_nodes <= 2:
+                node_size = 1200  # Even smaller for 2 nodes to prevent cropping
+            elif total_nodes <= 5:
+                node_size = 1800  # Medium for few nodes
+            else:
+                node_size = 2000  # Large for many nodes
+            node_sizes.append(node_size)
+
+        # Draw nodes with NetworkX functions for perfect circles
+        nx.draw_networkx_nodes(
+            graph, pos,
+            node_color=node_colors,
+            node_size=node_sizes,
+            node_shape='o',  # Explicitly specify circle shape
+            edgecolors='black',
+            linewidths=2,
+            alpha=0.9,
+            ax=ax
+        )
+
+        # Draw edges by interaction type
+        legend_handles = []
+                        # Get all unique interaction types that actually have edges
+        edge_types = set(d.get('type') for u, v, d in graph.edges(data=True))
+
+        for interaction_type in edge_types:
+            # Get the style for this interaction type
+            style = INTERACTION_STYLES.get(interaction_type, INTERACTION_STYLES['hydrogen_bond'])
+            edges = [
+                (u, v) for u, v, d in graph.edges(data=True)
+                if d.get('type') == interaction_type
+            ]
+            if edges:
+                nx.draw_networkx_edges(
+                    graph, pos, edgelist=edges,
+                    edge_color=style['color'],
+                    style=style['style'],
+                    width=style['width'],
+                    alpha=0.8,
+                    ax=ax
+                )
+                legend_handles.append(
+                    mlines.Line2D(
+                        [], [], color=style['color'], linestyle=style['style'],
+                        linewidth=style['width'], label=style['label']
+                    )
+                )
+
+        # Draw node labels with proper formatting
+        node_labels = {}
+        for node in graph.nodes():
             chain = node_chain[node]
             aa = node_resname[node]
             num = node_resnum[node]
-            label_text = f"{chain}\n{aa}\n{num}"
-            text = plt.gca().text(x, y, label_text, fontsize=12, ha='center', va='center', color='black', zorder=4, linespacing=1.1, fontname='Helvetica')
-            text.set_path_effects([
-                path_effects.Stroke(linewidth=3, foreground='white'),
-                path_effects.Normal()
-            ])
-        # Draw edges by interaction type
-        legend_handles = []
-        for interaction_type, style in INTERACTION_STYLES.items():
-            edges = [(u, v) for u, v, d in G.edges(data=True) if d.get('type') == interaction_type]
-            if edges:
-                nx.draw_networkx_edges(
-                    G, pos, edgelist=edges, edge_color=style['color'], style=style['style'], width=style['width'], ax=plt.gca()
-                )
-                legend_handles.append(
-                    mlines.Line2D([], [], color=style['color'], linestyle=style['style'], linewidth=style['width'], label=style['label'])
-                )
-        # Draw occupancy labels
+            # Format: Chain\nAA\nNumber
+            node_labels[node] = f"{chain}\n{aa}\n{num}"
+
+                # Draw labels with NetworkX function - larger font for better visibility
+        nx.draw_networkx_labels(
+            graph, pos,
+            labels=node_labels,
+            font_size=12,  # Increased font size
+            font_family='Helvetica',
+            font_weight='bold',
+            ax=ax
+        )
+
+        # Draw edge labels with better positioning
         if edge_labels:
-            nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_color='purple', font_size=13, label_pos=0.5, ax=plt.gca())
-        plt.title("Consolidated Protein-Protein Interaction Diagram", fontsize=18, fontname='Helvetica')
-        plt.axis('off')
-        plt.tight_layout()
+            # Filter low occupancy interactions
+            filtered_edge_labels = {
+                k: v for k, v in edge_labels.items()
+                if int(v.replace('%', '')) >= 10
+            }
+
+            # Use NetworkX edge label function with custom positioning
+            nx.draw_networkx_edge_labels(
+                graph, pos,
+                edge_labels=filtered_edge_labels,
+                font_size=9,
+                font_color='darkred',
+                font_weight='bold',
+                bbox=dict(
+                    boxstyle="round,pad=0.2",
+                    facecolor='white',
+                    edgecolor='gray',
+                    alpha=0.9
+                ),
+                label_pos=0.6,  # Position labels 60% along the edge
+                ax=ax
+            )
+
+        # Professional title and styling
+        title_text = custom_title if custom_title else "Consolidated Protein-Protein Interaction Network"
+        plt.title(
+            title_text,
+            fontsize=20, fontname='Helvetica', fontweight='bold', pad=20
+        )
+
+        # Professional legend
         if legend_handles:
-            plt.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.05), ncol=2, fontsize=13, frameon=True, prop={'family': 'Helvetica'})
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            ax.legend(
+                handles=legend_handles,
+                loc='upper center',
+                bbox_to_anchor=(0.5, -0.05),
+                ncol=2,
+                fontsize=12,
+                frameon=True,
+                prop={'family': 'Helvetica', 'size': 11},
+                fancybox=True,
+                shadow=True
+            )
+
+                # Add chain labels for left/right layout
+        if len(unique_chains) >= 2:
+            # Get the y-coordinates for positioning chain labels
+            all_y = [pos[n][1] for n in graph.nodes()]
+            max_y = max(all_y) if all_y else 0
+
+            # Add chain labels above the columns
+            ax.text(-x_separation, max_y + 1.0, f"Chain {chain1}",
+                   fontsize=16, ha='center', fontweight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5",
+                           facecolor=CHAIN_COLORS.get(chain1, CHAIN_COLORS['default']),
+                           alpha=0.3))
+
+            ax.text(x_separation, max_y + 1.0, f"Chain {chain2}",
+                   fontsize=16, ha='center', fontweight='bold',
+                   bbox=dict(boxstyle="round,pad=0.5",
+                           facecolor=CHAIN_COLORS.get(chain2, CHAIN_COLORS['default']),
+                           alpha=0.3))
+
+                # Clean up the plot
+        ax.set_axis_off()
+
+        # CRITICAL: Maintain perfect circles
+        ax.set_aspect('equal')
+
+        # Ensure proper spacing with adequate padding first
+        plt.tight_layout(pad=3.0)  # Increased padding for better spacing
+
+        # Then add margins to prevent node cropping
+        # Increase margins for single interactions to prevent cropping
+        total_nodes = len(graph.nodes())
+        if total_nodes <= 2:
+            ax.margins(0.3)  # 30% margin for 2 nodes
+        else:
+            ax.margins(0.2)  # 20% margin for multiple nodes
+
+        # Save with high quality
+        plt.savefig(
+            output_file,
+            dpi=300,
+            bbox_inches='tight',
+            facecolor='white',
+            edgecolor='none'
+        )
         plt.close()
-        self.logger.info(f"✅ Network plot saved to {output_file}")
+
+        self.logger.info(f"✅ Professional network plot saved to {output_file}")
 
 # --- CLI and Main ---
 def submit_job(args, host, jobname):
@@ -391,7 +758,9 @@ def submit_job(args, host, jobname):
     :return: Job object
     :rtype: schrodinger.job.jobcontrol.Job
     """
-    schrodinger_run = os.path.join(os.environ.get("SCHRODINGER", "/opt/schrodinger"), "run")
+    schrodinger_run = os.path.join(
+        os.environ.get("SCHRODINGER", "/opt/schrodinger"), "run"
+    )
     cmd = [
         schrodinger_run, sys.executable, os.path.abspath(__file__),
         "--cms", args.cms,
@@ -425,7 +794,11 @@ def test_schrodinger_ppi_analyzer(cms_file, traj_file, logger=None):
     try:
         from schrodinger.application.desmond.packages import analysis, topo, traj
     except ImportError:
-        print("[ERROR] Schrodinger modules not available. Cannot run analyzer test.")
+        msg = "Schrodinger modules not available. Cannot run analyzer test."
+        if logger:
+            logger.error(msg)
+        else:
+            print(f"[ERROR] {msg}")
         return
     import collections
     cms_file = str(cms_file)
@@ -472,11 +845,11 @@ def run_ppi_analysis_with_schrodinger(cms_file, traj_file, logger=None):
     try:
         from schrodinger.application.desmond.packages import analysis, topo, traj
     except ImportError:
-        msg = "[ERROR] Schrodinger modules not available. Cannot run analyzer."
+        msg = "Schrodinger modules not available. Cannot run analyzer."
         if logger:
             logger.error(msg)
         else:
-            print(msg)
+            print(f"[ERROR] {msg}")
         return None
     cms_file = str(cms_file)
     traj_file = str(traj_file)
@@ -485,11 +858,11 @@ def run_ppi_analysis_with_schrodinger(cms_file, traj_file, logger=None):
     analyzer = analysis.ProtProtInter(msys_model, cms_model, "protein")
     results = analysis.analyze(tr, analyzer)
     if not isinstance(results, dict):
-        msg = f"[ERROR] Unexpected analyzer result type: {type(results)}"
+        msg = f"Unexpected analyzer result type: {type(results)}"
         if logger:
             logger.error(msg)
         else:
-            print(msg)
+            print(f"[ERROR] {msg}")
         return None
     return results
 
@@ -507,18 +880,58 @@ def main():
     import json
     # Configurable threshold for consolidated plot
     MAX_CONSOLIDATED_EDGES = 30
-    parser = argparse.ArgumentParser(description="Protein-protein PPI analysis and visualization (Schrödinger style)")
-    parser.add_argument('--cms', required=True, type=str, help='Path to the Desmond .cms structure file')
-    parser.add_argument('--traj', required=True, type=str, help='Path to the trajectory file or directory')
-    parser.add_argument('--chain-groups', nargs='+', default=None, help='Chain groups to analyze (e.g., A,B C,D). If not specified, available chains will be listed.')
-    parser.add_argument('--occupancy-threshold', type=float, default=0.2, help='Minimum occupancy threshold (default: 0.2)')
-    parser.add_argument('--output-prefix', type=str, default='ppi_analysis', help='Prefix for output files (default: ppi_analysis)')
-    parser.add_argument('--debug', action='store_true', help='Enable detailed debug/progress logging')
-    parser.add_argument('--max-frames', type=int, default=None, help='Maximum number of trajectory frames to analyze (default: all)')
-    parser.add_argument('--submit-job', action='store_true', help='Submit this script as a Schrodinger job and exit')
-    parser.add_argument('--host', type=str, default='localhost', help='Host for job submission (default: localhost)')
-    parser.add_argument('--jobname', type=str, default='ppi_analysis', help='Job name for submission (default: ppi_analysis)')
-    parser.add_argument('--test-schrodinger-analyzer', action='store_true', help='Run a test of Schrodinger ProtProtInter analyzer and print summary')
+    parser = argparse.ArgumentParser(
+        description="Protein-protein PPI analysis and visualization (Schrödinger style)"
+    )
+    parser.add_argument(
+        '--cms', required=True, type=str,
+        help='Path to the Desmond .cms structure file'
+    )
+    parser.add_argument(
+        '--traj', required=True, type=str,
+        help='Path to the trajectory file or directory'
+    )
+    parser.add_argument(
+        '--chain-groups', nargs='+', default=None,
+        help='Chain groups to analyze (e.g., A,B C,D). If not specified, available chains will be listed.'
+    )
+    parser.add_argument(
+        '--occupancy-threshold', type=float, default=0.2,
+        help='Minimum occupancy threshold (default: 0.2)'
+    )
+    parser.add_argument(
+        '--output-prefix', type=str, default='ppi_analysis',
+        help='Prefix for output files (default: ppi_analysis)'
+    )
+    parser.add_argument(
+        '--debug', action='store_true',
+        help='Enable detailed debug/progress logging'
+    )
+    parser.add_argument(
+        '--max-frames', type=int, default=None,
+        help='Maximum number of trajectory frames to analyze (default: all)'
+    )
+    parser.add_argument(
+        '--skip-single-interactions',
+        action='store_true',
+        help='Skip individual plots for interaction types with only 1 interaction (default: generate all)'
+    )
+    parser.add_argument(
+        '--submit-job', action='store_true',
+        help='Submit this script as a Schrodinger job and exit'
+    )
+    parser.add_argument(
+        '--host', type=str, default='localhost',
+        help='Host for job submission (default: localhost)'
+    )
+    parser.add_argument(
+        '--jobname', type=str, default='ppi_analysis',
+        help='Job name for submission (default: ppi_analysis)'
+    )
+    parser.add_argument(
+        '--test-schrodinger-analyzer', action='store_true',
+        help='Run a test of Schrodinger ProtProtInter analyzer and print summary'
+    )
     args = parser.parse_args()
 
     # Create output directory
@@ -536,31 +949,49 @@ def main():
     logger.addHandler(file_handler)
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
 
+    # Validate inputs
+    if not validate_files(args.cms, args.traj, logger):
+        sys.exit(1)
+
+    if not validate_parameters(args, logger):
+        sys.exit(1)
+
     if args.submit_job:
         if not SCHRODINGER_AVAILABLE:
             print("❌ Schrodinger job control is not available in this environment.")
             sys.exit(1)
-        logger.info(f"Submitting job to host: {args.host} with jobname: {args.jobname}")
+        logger.info(
+            f"Submitting job to host: {args.host} with jobname: {args.jobname}"
+        )
         job = submit_job(args, args.host, args.jobname)
         logger.info(f"Job submitted: {job}")
         print(f"Job submitted to host: {args.host} with jobname: {args.jobname}")
         sys.exit(0)
 
     if getattr(args, 'test_schrodinger_analyzer', False):
-        test_schrodinger_ppi_analyzer(args.cms, args.traj)
+        test_schrodinger_ppi_analyzer(args.cms, args.traj, logger)
         sys.exit(0)
 
     # Parse chain groups
     def parse_chain_groups(chain_groups_list):
         return [set(group.split(',')) for group in chain_groups_list]
+
     if args.chain_groups is None or len(args.chain_groups) < 2:
-        logger.error("You must specify at least two chain groups for inter-chain analysis.")
+        logger.error(
+            "You must specify at least two chain groups for inter-chain analysis."
+        )
         sys.exit(1)
+
+    if not validate_chain_groups(args.chain_groups, logger):
+        sys.exit(1)
+
     chain_groups = parse_chain_groups(args.chain_groups)
     group1, group2 = chain_groups[0], chain_groups[1]
+
     def get_chain(res_id):
         # res_id is like 'A:GLU_146'
         return res_id.split(':')[0]
+
     logger.info("Using Schrodinger ProtProtInter analyzer for PPI analysis.")
     ppi_summary = run_ppi_analysis_with_schrodinger(args.cms, args.traj, logger)
     if ppi_summary is None:
@@ -580,7 +1011,8 @@ def main():
         for (res1, res2), count in pairs.items():
             chain1 = get_chain(res1)
             chain2 = get_chain(res2)
-            if ((chain1 in group1 and chain2 in group2) or (chain2 in group1 and chain1 in group2)):
+            if ((chain1 in group1 and chain2 in group2) or
+                (chain2 in group1 and chain1 in group2)):
                 occupancy = count / total_frames
                 interactions.append({
                     'res1': res1,
@@ -588,14 +1020,22 @@ def main():
                     'occupancy': occupancy,
                     'type': interaction_type
                 })
-        filtered_interactions = [inter for inter in interactions if inter['occupancy'] >= args.occupancy_threshold]
+        filtered_interactions = [
+            inter for inter in interactions
+            if inter['occupancy'] >= args.occupancy_threshold
+        ]
         persistent_by_type[interaction_type] = filtered_interactions
     # Now group H-bond subtypes (excluding hbond_self)
     HBOND_SUBTYPES = {'hbond_bb', 'hbond_ss', 'hbond_sb', 'hbond_bs'}
     grouped_persistent_by_type = {}
     for interaction_type, interactions in persistent_by_type.items():
         if interaction_type in HBOND_SUBTYPES:
-            grouped_persistent_by_type.setdefault('hydrogen_bond', []).extend(interactions)
+            # Update the type field to 'hydrogen_bond' for grouped interactions
+            for inter in interactions:
+                inter['type'] = 'hydrogen_bond'
+            grouped_persistent_by_type.setdefault('hydrogen_bond', []).extend(
+                interactions
+            )
         elif interaction_type == 'hbond_self':
             continue
         else:
@@ -603,20 +1043,44 @@ def main():
     # Plot grouped per-type networks (skip H-bond subtypes)
     plotter = PPIPlotter(logger)
     for interaction_type, interactions in grouped_persistent_by_type.items():
-        if interaction_type != 'hydrogen_bond' and interaction_type not in INTERACTION_STYLES:
-            logger.warning(f"Skipping unknown interaction type: {interaction_type}")
+        if (interaction_type != 'hydrogen_bond' and
+            interaction_type not in INTERACTION_STYLES):
+            logger.warning(
+                f"Skipping unknown interaction type: {interaction_type}"
+            )
             continue
-        plotter.plot_network(
+
+        # Check if user wants to skip single interactions
+        if args.skip_single_interactions and len(interactions) <= 1:
+            logger.info(
+                f"⏭️ Skipping individual plot for {interaction_type} - only {len(interactions)} interaction(s) "
+                f"(use --skip-single-interactions to enable)"
+            )
+            continue
+
+        # Generate individual plot for this interaction type
+        logger.info(
+            f"📊 Generating individual plot for {interaction_type} with {len(interactions)} interaction(s)"
+        )
+
+        plotter.plotNetwork(
             interactions,
             output_file=str(output_dir / f"{args.output_prefix}_interactions_{interaction_type}.png"),
             title=f"{interaction_type.replace('_', ' ').replace('-', ' ').title()} Interactions"
         )
     # Plot consolidated network only if number of unique pairs is within threshold
-    total_pairs = sum(len(interactions) for interactions in grouped_persistent_by_type.values())
+    total_pairs = sum(
+        len(interactions) for interactions in grouped_persistent_by_type.values()
+    )
     if total_pairs <= MAX_CONSOLIDATED_EDGES:
-        plotter.plot_consolidated(grouped_persistent_by_type, output_file=str(output_dir / f"{args.output_prefix}_consolidated.png"))
+        plotter.plotConsolidated(
+            grouped_persistent_by_type,
+            output_file=str(output_dir / f"{args.output_prefix}_consolidated.png")
+        )
     else:
-        logger.info(f"Too many interactions ({total_pairs}); skipping consolidated plot for clarity.")
+        logger.info(
+            f"Too many interactions ({total_pairs}); skipping consolidated plot for clarity."
+        )
     # Save persistent interaction data as JSON
     with open(output_dir / "persistent_interactions.json", "w") as f:
         json.dump(grouped_persistent_by_type, f, indent=2)
