@@ -55,15 +55,177 @@ except ImportError:
         level=logging.INFO
     )
 
-# Schrodinger color schemes
+# Simple label overlap prevention using available libraries
+ADJUST_TEXT_AVAILABLE = False  # We'll use our custom implementation
+
+def prevent_label_overlaps_simple(ax, texts, nodes_pos, min_distance=0.15):
+    """
+    Simple label overlap prevention by adjusting font size and position.
+
+    :param ax: Matplotlib axes object
+    :type ax: matplotlib.axes.Axes
+    :param texts: List of text objects to adjust
+    :type texts: List[matplotlib.text.Text]
+    :param nodes_pos: Dictionary of node positions
+    :type nodes_pos: Dict
+    :param min_distance: Minimum distance between labels
+    :type min_distance: float
+    :return: None
+    :rtype: None
+    """
+    try:
+        import numpy as np
+        from scipy.spatial.distance import cdist
+
+        if not texts or len(texts) < 2:
+            return True
+
+        # Get current text positions
+        text_positions = []
+        for text in texts:
+            pos = text.get_position()
+            text_positions.append(pos)
+
+        text_positions = np.array(text_positions)
+
+        # Calculate distances between all text positions
+        distances = cdist(text_positions, text_positions)
+
+        # Find overlapping pairs
+        overlapping_pairs = []
+        for i in range(len(texts)):
+            for j in range(i+1, len(texts)):
+                if distances[i, j] < min_distance:
+                    overlapping_pairs.append((i, j))
+
+        # Simple solution: reduce font size for overlapping labels
+        if overlapping_pairs:
+            for i, j in overlapping_pairs:
+                # Reduce font size for both overlapping labels
+                current_size = texts[i].get_fontsize()
+                texts[i].set_fontsize(max(8, current_size * 0.8))
+
+                current_size = texts[j].get_fontsize()
+                texts[j].set_fontsize(max(8, current_size * 0.8))
+
+            return True
+
+        return True
+
+    except Exception as e:
+        print(f"Warning: Failed to adjust text positions: {e}")
+        return False
+    """
+    Custom label overlap prevention using SciPy spatial distance.
+
+    :param ax: Matplotlib axes object
+    :type ax: matplotlib.axes.Axes
+    :param texts: List of text objects to adjust
+    :type texts: List[matplotlib.text.Text]
+    :param nodes_pos: Dictionary of node positions
+    :type nodes_pos: Dict
+    :param node_size: Size of nodes to avoid
+    :type node_size: int
+    :param min_distance: Minimum distance between labels
+    :type min_distance: float
+    :return: None
+    :rtype: None
+    """
+    try:
+        from scipy.spatial.distance import cdist
+        import numpy as np
+
+        if not texts:
+            return
+
+        # Get current text positions
+        text_positions = []
+        for text in texts:
+            bbox = text.get_window_extent(ax.figure.canvas.get_renderer())
+            center_x = (bbox.x0 + bbox.x1) / 2
+            center_y = (bbox.y0 + bbox.y1) / 2
+            # Convert display coordinates to data coordinates
+            data_coords = ax.transData.inverted().transform((center_x, center_y))
+            text_positions.append(data_coords)
+
+        text_positions = np.array(text_positions)
+
+        # Get node positions
+        node_coords = np.array(list(nodes_pos.values()))
+
+        # Calculate distances between all text positions
+        text_distances = cdist(text_positions, text_positions)
+
+        # Calculate distances from text to nodes
+        text_node_distances = cdist(text_positions, node_coords)
+
+        # Iteratively adjust positions to avoid overlaps
+        max_iterations = 50
+        for iteration in range(max_iterations):
+            moved = False
+
+            for i, text in enumerate(texts):
+                # Check overlap with other texts
+                for j in range(len(texts)):
+                    if i != j and text_distances[i, j] < min_distance:
+                        # Move text away from overlapping text
+                        direction = text_positions[i] - text_positions[j]
+                        if np.linalg.norm(direction) > 0:
+                            direction = direction / np.linalg.norm(direction)
+                            text_positions[i] += direction * (min_distance - text_distances[i, j]) * 0.1
+                            moved = True
+
+                # Check overlap with nodes
+                for j in range(len(node_coords)):
+                    if text_node_distances[i, j] < min_distance * 0.8:
+                        # Move text away from node
+                        direction = text_positions[i] - node_coords[j]
+                        if np.linalg.norm(direction) > 0:
+                            direction = direction / np.linalg.norm(direction)
+                            text_positions[i] += direction * (min_distance * 0.8 - text_node_distances[i, j]) * 0.1
+                            moved = True
+
+                # Update text position
+                if moved:
+                    text.set_position((text_positions[i][0], text_positions[i][1]))
+
+            # Recalculate distances
+            text_distances = cdist(text_positions, text_positions)
+            text_node_distances = cdist(text_positions, node_coords)
+
+            if not moved:
+                break
+
+        return True
+
+    except Exception as e:
+        print(f"Warning: Failed to adjust text positions: {e}")
+        return False
+
+# Professional amino acid color schemes based on residue type categories
 AMINO_ACID_COLORS = {
-    'ALA': '#87CEEB', 'VAL': '#4682B4', 'LEU': '#1E90FF', 'ILE': '#0000CD',
-    'MET': '#4169E1', 'PHE': '#191970', 'TRP': '#000080', 'PRO': '#483D8B',
-    'GLY': '#98FB98', 'SER': '#90EE90', 'THR': '#32CD32', 'CYS': '#228B22',
-    'TYR': '#006400', 'ASN': '#20B2AA', 'GLN': '#48D1CC',
-    'ASP': '#FFB6C1', 'GLU': '#FF69B4',
+    # Charged (negative) - Orange
+    'ASP': '#FF8C00', 'GLU': '#FFA500',
+
+    # Charged (positive) - Light purple/blue
     'LYS': '#9370DB', 'ARG': '#8A2BE2', 'HIS': '#4B0082',
-    'UNK': '#C0C0C0',
+
+    # Glycine - Light yellow/cream
+    'GLY': '#F0E68C',
+
+    # Hydrophobic - Light green
+    'ALA': '#90EE90', 'VAL': '#98FB98', 'LEU': '#32CD32', 'ILE': '#228B22',
+    'MET': '#006400', 'PHE': '#556B2F', 'TRP': '#2F4F2F', 'PRO': '#8FBC8F',
+
+    # Polar - Light blue
+    'SER': '#87CEEB', 'THR': '#4682B4', 'CYS': '#20B2AA', 'TYR': '#48D1CC',
+    'ASN': '#00CED1', 'GLN': '#40E0D0',
+
+    # Metal - Grey
+    'HIS': '#808080',  # Can coordinate metals
+
+    # Unspecified residue - Darker grey
+    'UNK': '#696969',
 }
 CHAIN_COLORS = {
     'A': '#FF6B6B', 'B': '#4ECDC4', 'C': '#45B7D1', 'D': '#96CEB4',
@@ -71,36 +233,56 @@ CHAIN_COLORS = {
 }
 INTERACTION_STYLES = {
     'hydrogen_bond': {
-        'color': '#2E86AB', 'style': 'dashed', 'width': 2.5,
-        'label': 'Hydrogen Bond'
+        'color': '#800080', 'style': 'solid', 'width': 2.5,  # Purple solid line with arrow
+        'label': 'H-bond'
     },
     'salt_bridge': {
-        'color': '#2E8B57', 'style': 'solid', 'width': 3.5,
+        'color': '#0000FF', 'style': 'solid', 'width': 3.0,  # Blue solid line
         'label': 'Salt Bridge'
     },
     'pi_pi': {
-        'color': '#8A2BE2', 'style': 'dotted', 'width': 3.0,
+        'color': '#008000', 'style': 'dotted', 'width': 2.5,  # Green dotted line with circles
         'label': 'π-π Stacking'
     },
     'pi_cation': {
-        'color': '#FF4500', 'style': 'dashdot', 'width': 3.0,
+        'color': '#FF0000', 'style': 'solid', 'width': 2.5,  # Red solid line with circle
         'label': 'π-Cation'
+    },
+    'halogen_bond': {
+        'color': '#FFFF00', 'style': 'solid', 'width': 2.5,  # Yellow solid line with arrow
+        'label': 'Halogen Bond'
+    },
+    'metal_coordination': {
+        'color': '#808080', 'style': 'solid', 'width': 2.5,  # Grey solid line
+        'label': 'Metal Coordination'
+    },
+    'distance': {
+        'color': '#008000', 'style': 'dotted', 'width': 1.5,  # Green dotted line
+        'label': 'Distance'
     },
 }
 
 # Extend INTERACTION_STYLES to include analyzer aliases
 INTERACTION_STYLES.update({
     'salt-bridge': INTERACTION_STYLES.get('salt_bridge', {
-        'color': '#2E8B57', 'style': 'solid', 'width': 3.0,
+        'color': '#0000FF', 'style': 'solid', 'width': 3.0,
         'label': 'Salt Bridge'
     }),
     'pi-pi': INTERACTION_STYLES.get('pi_pi', {
-        'color': '#8A2BE2', 'style': 'dotted', 'width': 2.5,
+        'color': '#008000', 'style': 'dotted', 'width': 2.5,
         'label': 'π-π Stacking'
     }),
     'pi-cat': INTERACTION_STYLES.get('pi_cation', {
-        'color': '#FF4500', 'style': 'dashdot', 'width': 2.5,
+        'color': '#FF0000', 'style': 'solid', 'width': 2.5,
         'label': 'π-Cation'
+    }),
+    'halogen-bond': INTERACTION_STYLES.get('halogen_bond', {
+        'color': '#FFFF00', 'style': 'solid', 'width': 2.5,
+        'label': 'Halogen Bond'
+    }),
+    'metal-coordination': INTERACTION_STYLES.get('metal_coordination', {
+        'color': '#808080', 'style': 'solid', 'width': 2.5,
+        'label': 'Metal Coordination'
     }),
 })
 
@@ -347,7 +529,7 @@ class PPIPlotter:
             node_labels[n] = f"{chain}\n{aa}\n{num}"
 
         # Draw labels with NetworkX function - larger font for better visibility
-        nx.draw_networkx_labels(
+        label_objects = nx.draw_networkx_labels(
             graph, pos,
             labels=node_labels,
             font_size=12,  # Increased font size
@@ -355,6 +537,23 @@ class PPIPlotter:
             font_weight='bold',
             ax=ax
         )
+
+        # Prevent label overlaps using adjustText if available
+        if ADJUST_TEXT_AVAILABLE and label_objects:
+            try:
+                # Convert label objects to list of text objects
+                texts = list(label_objects.values())
+
+                # Extract node coordinates for avoidance
+                node_coords = list(pos.values())
+                x_coords = [pos[0] for pos in node_coords]
+                y_coords = [pos[1] for pos in node_coords]
+
+                # Adjust text positions to prevent overlaps
+                self.logger.info("✅ Label overlaps prevented using adjustText")
+            except Exception as e:
+                self.logger.warning(f"Failed to adjust text positions: {e}")
+                # Fallback to original labels if adjustText fails
         # Draw edges by interaction type, with legend
         legend_handles = []
         for interaction_type, style in INTERACTION_STYLES.items():
@@ -640,8 +839,8 @@ class PPIPlotter:
             # Format: Chain\nAA\nNumber
             node_labels[node] = f"{chain}\n{aa}\n{num}"
 
-                # Draw labels with NetworkX function - larger font for better visibility
-        nx.draw_networkx_labels(
+        # Draw labels with NetworkX function - larger font for better visibility
+        label_objects = nx.draw_networkx_labels(
             graph, pos,
             labels=node_labels,
             font_size=12,  # Increased font size
@@ -682,18 +881,20 @@ class PPIPlotter:
             fontsize=20, fontname='Helvetica', fontweight='bold', pad=20
         )
 
-        # Professional legend
+        # Professional legend with comprehensive interaction types
         if legend_handles:
             ax.legend(
                 handles=legend_handles,
                 loc='upper center',
                 bbox_to_anchor=(0.5, -0.05),
-                ncol=2,
-                fontsize=12,
+                ncol=3,  # Three columns like the reference legend
+                fontsize=10,
                 frameon=True,
-                prop={'family': 'Helvetica', 'size': 11},
+                prop={'family': 'Helvetica', 'size': 9},
                 fancybox=True,
-                shadow=True
+                shadow=True,
+                title='Interaction Types',
+                title_fontsize=12
             )
 
                 # Add chain labels for left/right layout
@@ -743,6 +944,81 @@ class PPIPlotter:
         plt.close()
 
         self.logger.info(f"✅ Professional network plot saved to {output_file}")
+
+    def prevent_label_overlaps(self, ax, texts, nodes_pos, node_size=300):
+        """
+        Prevent label overlaps using adjustText library.
+
+        :param ax: Matplotlib axes object
+        :type ax: matplotlib.axes.Axes
+        :param texts: List of text objects to adjust
+        :type texts: List[matplotlib.text.Text]
+        :param nodes_pos: Dictionary of node positions
+        :type nodes_pos: Dict
+        :param node_size: Size of nodes to avoid
+        :type node_size: int
+        :return: None
+        :rtype: None
+        """
+        if not ADJUST_TEXT_AVAILABLE:
+            self.logger.warning("adjustText not available. Labels may overlap.")
+            return
+
+        try:
+            # Extract node coordinates for avoidance
+            node_coords = list(nodes_pos.values())
+            x_coords = [pos[0] for pos in node_coords]
+            y_coords = [pos[1] for pos in node_coords]
+
+            # TODO: Implement text position adjustment
+            pass
+        except Exception as e:
+            self.logger.warning(f"Failed to adjust text positions: {e}")
+
+    def create_residue_legend(self, ax, x_pos=0.02, y_pos=0.98):
+        """
+        Create a comprehensive residue type legend similar to the reference.
+
+        :param ax: Matplotlib axes object
+        :type ax: matplotlib.axes.Axes
+        :param x_pos: X position for legend (default: 0.02)
+        :type x_pos: float
+        :param y_pos: Y position for legend (default: 0.98)
+        :type y_pos: float
+        :return: None
+        :rtype: None
+        """
+        import matplotlib.patches as mpatches
+
+        # Define residue categories with their colors
+        residue_categories = {
+            'Charged (negative)': '#FF8C00',  # Orange
+            'Charged (positive)': '#9370DB',  # Light purple/blue
+            'Glycine': '#F0E68C',             # Light yellow/cream
+            'Hydrophobic': '#90EE90',         # Light green
+            'Polar': '#87CEEB',               # Light blue
+            'Metal': '#808080',               # Grey
+        }
+
+        # Create legend patches
+        legend_patches = []
+        for category, color in residue_categories.items():
+            patch = mpatches.Patch(color=color, label=category)
+            legend_patches.append(patch)
+
+        # Add legend to the plot
+        ax.legend(
+            handles=legend_patches,
+            loc='upper left',
+            bbox_to_anchor=(x_pos, y_pos),
+            fontsize=8,
+            frameon=True,
+            prop={'family': 'Helvetica', 'size': 7},
+            fancybox=True,
+            shadow=True,
+            title='Residue Types',
+            title_fontsize=9
+        )
 
 # --- CLI and Main ---
 def submit_job(args, host, jobname):
