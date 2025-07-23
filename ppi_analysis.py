@@ -456,17 +456,46 @@ class PPIPlotter:
             chain1, chain2 = unique_chains[0], unique_chains[1]
             chain1_nodes = chain_to_nodes[chain1]
             chain2_nodes = chain_to_nodes[chain2]
-            # Sort by residue number for each chain
-            def resnum_key(n):
+            # Calculate interaction counts manually from edges data
+            node_interaction_counts = {}
+            for node in graph.nodes():
+                node_interaction_counts[node] = 0
+
+            # Count interactions from edges_by_type
+            for interaction_type, edges in edges_by_type.items():
+                for edge in edges:
+                    if len(edge) == 2:
+                        node1, node2 = edge
+                        node_interaction_counts[node1] += 1
+                        node_interaction_counts[node2] += 1
+
+            # Sort by interaction count (highest first) then by residue number
+            def interaction_count_key(n):
                 try:
-                    return int(node_resnum[n])
+                    interaction_count = node_interaction_counts.get(n, 0)
+                    # Use negative for descending order (highest first)
+                    return (-interaction_count, int(node_resnum[n]))
                 except Exception:
-                    return 0
-            chain1_nodes.sort(key=resnum_key)
-            chain2_nodes.sort(key=resnum_key)
+                    return (0, 0)
+
+            chain1_nodes.sort(key=interaction_count_key)
+            chain2_nodes.sort(key=interaction_count_key)
+
+            # Debug: Log the ordering
+            self.logger.info(f"Chain {chain1} ordering by interaction count:")
+            for node in chain1_nodes:
+                count = node_interaction_counts.get(node, 0)
+                resnum = node_resnum.get(node, '?')
+                self.logger.info(f"  {node}: {count} interactions (residue {resnum})")
+
+            self.logger.info(f"Chain {chain2} ordering by interaction count:")
+            for node in chain2_nodes:
+                count = node_interaction_counts.get(node, 0)
+                resnum = node_resnum.get(node, '?')
+                self.logger.info(f"  {node}: {count} interactions (residue {resnum})")
 
             # Position nodes in left/right layout
-            y_gap = 1.2  # Spacing between nodes
+            y_gap = 2.0  # Increased spacing between nodes for better label clarity
             x_separation = 3.0  # Separation between chains
 
             for i, node in enumerate(chain1_nodes):
@@ -506,18 +535,37 @@ class PPIPlotter:
             resname = node_resname[n]
             fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
             node_colors.append(fill_color)
-            node_sizes.append(2000)  # Much larger node size for better text visibility
+            # Dynamic node size based on number of nodes
+            total_nodes = len(graph.nodes())
+            if total_nodes <= 2:
+                node_size = 8000  # Much larger for 2 nodes to fit text
+            elif total_nodes <= 5:
+                node_size = 6000  # Larger for few nodes
+            elif total_nodes <= 10:
+                node_size = 5000  # Medium for moderate nodes
+            else:
+                node_size = 4000  # Large for many nodes
+            node_sizes.append(node_size)
 
-        # Draw nodes with NetworkX functions for perfect circles
-        nx.draw_networkx_nodes(
-            graph, pos,
-            node_color=node_colors,
-            node_size=node_sizes,
-            edgecolors='black',
-            linewidths=2,
-            alpha=0.9,
-            ax=ax
-        )
+        # Draw nodes with explicit matplotlib Circle patches for perfect circles
+        import matplotlib.patches as patches
+
+        # Calculate node radius based on node sizes
+        avg_node_size = sum(node_sizes) / len(node_sizes) if node_sizes else 2000
+        node_radius = (avg_node_size ** 0.5) * 0.01  # Scale factor for conversion
+
+        for i, node in enumerate(graph.nodes()):
+            x, y = pos[node]
+            color = node_colors[i] if i < len(node_colors) else '#2f4f2f'
+            circle = patches.Circle(
+                (x, y),
+                radius=node_radius,
+                facecolor=color,
+                edgecolor='black',
+                linewidth=2,
+                alpha=0.9
+            )
+            ax.add_patch(circle)
 
         # Draw node labels with proper formatting
         node_labels = {}
@@ -595,11 +643,11 @@ class PPIPlotter:
                     boxstyle='round,pad=0.2'
                 ), fontname='Helvetica'
             )
-        # Add professional legend
+        # Add professional legend closer to the network
         if legend_handles:
             ax.legend(
                 handles=legend_handles, loc='upper center',
-                bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=font_size,
+                bbox_to_anchor=(0.5, 0.02), ncol=3, fontsize=font_size,  # Moved closer to nodes
                 frameon=True, prop={'family': 'Helvetica'}
             )
         # Add chain labels for left/right layout
@@ -624,10 +672,17 @@ class PPIPlotter:
         plt.title(title, fontsize=font_size+8, fontname='Helvetica')
         ax.set_aspect('equal')
         ax.set_axis_off()
-        plt.tight_layout(rect=[0, 0.05, 1, 0.97])
+        plt.tight_layout(rect=[0, 0.08, 1, 0.95])  # Adjusted for closer legend
+
+        # Save as SVG for scalable vector graphics (editable labels)
+        svg_output_file = output_file.replace('.png', '.svg')
+        plt.savefig(svg_output_file, format='svg', bbox_inches='tight')
+
+        # Also save as PNG for compatibility
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         self.logger.info(f"✅ Network plot saved to {output_file}")
+        self.logger.info(f"✅ SVG version saved to {svg_output_file} (editable in vector software)")
 
     def plotNetwork(self, interactions: List[Dict[str, Any]], output_file: str,
                    title: str = "Protein-Protein Interaction Network"):
@@ -686,11 +741,11 @@ class PPIPlotter:
         # Adjust figure size based on number of nodes
         total_nodes = sum(len(interactions) for interactions in persistent_by_type.values())
         if total_nodes <= 2:
-            fig, ax = plt.subplots(figsize=(10, 8))  # Smaller figure for 2 nodes
+            fig, ax = plt.subplots(figsize=(14, 10))  # Wider figure for 2 nodes
         elif total_nodes <= 5:
-            fig, ax = plt.subplots(figsize=(12, 10))  # Medium figure for few nodes
+            fig, ax = plt.subplots(figsize=(16, 14))  # Wider figure for few nodes
         else:
-            fig, ax = plt.subplots(figsize=(16, 12))  # Large figure for many nodes
+            fig, ax = plt.subplots(figsize=(20, 20))  # Much wider figure for many nodes
         ax.set_aspect('equal')  # CRITICAL: This ensures perfect circles
 
         graph = nx.Graph()
@@ -740,28 +795,53 @@ class PPIPlotter:
             chain1_nodes = [n for n in graph.nodes() if node_chain[n] == chain1]
             chain2_nodes = [n for n in graph.nodes() if node_chain[n] == chain2]
 
-            # Sort nodes by residue number for each chain
-            def resnum_key(n):
-                try:
-                    return int(node_resnum[n])
-                except Exception:
-                    return 0
+            # Calculate interaction counts manually from graph edges
+            node_interaction_counts = {}
+            for node in graph.nodes():
+                node_interaction_counts[node] = 0
 
-            chain1_nodes.sort(key=resnum_key)
-            chain2_nodes.sort(key=resnum_key)
+            # Count interactions from graph edges
+            for u, v in graph.edges():
+                node_interaction_counts[u] += 1
+                node_interaction_counts[v] += 1
+
+            # Sort nodes by interaction count (highest first) then by residue number
+            def interaction_count_key(n):
+                try:
+                    interaction_count = node_interaction_counts.get(n, 0)
+                    # Use negative for descending order (highest first)
+                    return (-interaction_count, int(node_resnum[n]))
+                except Exception:
+                    return (0, 0)
+
+            chain1_nodes.sort(key=interaction_count_key)
+            chain2_nodes.sort(key=interaction_count_key)
+
+            # Debug: Log the ordering
+            self.logger.info(f"Consolidated - Chain {chain1} ordering by interaction count:")
+            for node in chain1_nodes:
+                count = node_interaction_counts.get(node, 0)
+                resnum = node_resnum.get(node, '?')
+                self.logger.info(f"  {node}: {count} interactions (residue {resnum})")
+
+            self.logger.info(f"Consolidated - Chain {chain2} ordering by interaction count:")
+            for node in chain2_nodes:
+                count = node_interaction_counts.get(node, 0)
+                resnum = node_resnum.get(node, '?')
+                self.logger.info(f"  {node}: {count} interactions (residue {resnum})")
 
             # Position nodes in left/right layout
             pos = {}
-            y_gap = 1.2  # Spacing between nodes
+            y_gap = 2.0  # Increased spacing between nodes for better label clarity
 
             # Adjust separation based on number of nodes to prevent cropping
             total_nodes = len(chain1_nodes) + len(chain2_nodes)
             if total_nodes <= 2:
-                x_separation = 1.5  # Smaller separation for 2 nodes
+                x_separation = 3.0  # Increased separation for 2 nodes
             elif total_nodes <= 5:
-                x_separation = 2.5  # Medium separation for few nodes
+                x_separation = 4.0  # Increased separation for few nodes
             else:
-                x_separation = 3.0  # Full separation for many nodes
+                x_separation = 5.0  # Increased separation for many nodes
 
             for i, node in enumerate(chain1_nodes):
                 pos[node] = (-x_separation, i * y_gap - (len(chain1_nodes)-1)*y_gap/2)
@@ -780,32 +860,47 @@ class PPIPlotter:
             fill_color = AMINO_ACID_COLORS.get(resname, AMINO_ACID_COLORS['UNK'])
             node_colors.append(fill_color)
 
-            # Dynamic node size based on number of nodes
+            # Calculate node sizes based on number of nodes
             total_nodes = len(graph.nodes())
             if total_nodes <= 2:
-                node_size = 1200  # Even smaller for 2 nodes to prevent cropping
+                node_size = 8000  # Much larger for 2 nodes to fit text
             elif total_nodes <= 5:
-                node_size = 1800  # Medium for few nodes
+                node_size = 6000  # Larger for few nodes
+            elif total_nodes <= 10:
+                node_size = 5000  # Medium for moderate nodes
             else:
-                node_size = 2000  # Large for many nodes
+                node_size = 4000  # Large for many nodes
             node_sizes.append(node_size)
 
-        # Draw nodes with NetworkX functions for perfect circles
-        nx.draw_networkx_nodes(
-            graph, pos,
-            node_color=node_colors,
-            node_size=node_sizes,
-            node_shape='o',  # Explicitly specify circle shape
-            edgecolors='black',
-            linewidths=2,
-            alpha=0.9,
-            ax=ax
-        )
+        # Draw nodes with explicit matplotlib Circle patches for perfect circles
+        import matplotlib.patches as patches
 
-        # Draw edges by interaction type
+        # Calculate node radius based on node sizes
+        avg_node_size = sum(node_sizes) / len(node_sizes) if node_sizes else 2000
+        node_radius = (avg_node_size ** 0.5) * 0.01  # Scale factor for conversion
+
+        for i, node in enumerate(graph.nodes()):
+            x, y = pos[node]
+            color = node_colors[i] if i < len(node_colors) else '#2f4f2f'
+            circle = patches.Circle(
+                (x, y),
+                radius=node_radius,
+                facecolor=color,
+                edgecolor='black',
+                linewidth=2,
+                alpha=0.9
+            )
+            ax.add_patch(circle)
+
+        # Draw edges by interaction type with edge-to-edge connections
         legend_handles = []
-                        # Get all unique interaction types that actually have edges
         edge_types = set(d.get('type') for u, v, d in graph.edges(data=True))
+
+        # Calculate node radius for edge connections based on actual node sizes
+        # Convert node size (in points) to data coordinates
+        avg_node_size = sum(node_sizes) / len(node_sizes) if node_sizes else 2000
+        # Approximate conversion: node_size in points to radius in data coordinates
+        node_radius = (avg_node_size ** 0.5) * 0.01  # Scale factor for conversion
 
         for interaction_type in edge_types:
             # Get the style for this interaction type
@@ -815,13 +910,9 @@ class PPIPlotter:
                 if d.get('type') == interaction_type
             ]
             if edges:
-                nx.draw_networkx_edges(
-                    graph, pos, edgelist=edges,
-                    edge_color=style['color'],
-                    style=style['style'],
-                    width=style['width'],
-                    alpha=0.8,
-                    ax=ax
+                # Draw edges with custom edge-to-edge connections
+                self._draw_edges_to_node_edges(
+                    graph, pos, edges, style, node_radius, ax
                 )
                 legend_handles.append(
                     mlines.Line2D(
@@ -849,44 +940,83 @@ class PPIPlotter:
             ax=ax
         )
 
-        # Draw edge labels with better positioning
+        # Draw edge labels with staggered/curved placement for clarity
         if edge_labels:
-            # Filter low occupancy interactions
             filtered_edge_labels = {
                 k: v for k, v in edge_labels.items()
                 if int(v.replace('%', '')) >= 10
             }
+            # Stagger label positions: alternate above/below and curve if needed
+            for idx, ((n1, n2), label) in enumerate(filtered_edge_labels.items()):
+                x1, y1 = pos[n1]
+                x2, y2 = pos[n2]
+                mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+                delta_x, delta_y = x2 - x1, y2 - y1
+                norm = np.sqrt(delta_x**2 + delta_y**2)
+                if norm == 0:
+                    continue
+                # Perpendicular offset direction
+                perp_x = -delta_y / norm
+                perp_y = delta_x / norm
+                # Alternate above/below and increase offset for dense regions
+                offset = 0.18 + 0.08 * (idx % 3)  # Stagger more for dense edges
+                side = 1 if idx % 2 == 0 else -1
+                label_x = mid_x + side * offset * perp_x
+                label_y = mid_y + side * offset * perp_y
+                # For very dense regions, curve the edge and place label at apex
+                if len(filtered_edge_labels) > 8:
+                    # Quadratic Bezier curve apex (t=0.5)
+                    curve_height = 0.25 + 0.08 * (idx % 3)
+                    control_x = mid_x + side * curve_height * perp_x
+                    control_y = mid_y + side * curve_height * perp_y
+                    # Place label at the control point (apex)
+                    label_x, label_y = control_x, control_y
+                    # Optionally, draw the curved edge (not just straight)
+                    from matplotlib.patches import FancyArrowPatch
+                    path = np.array([
+                        [x1, y1],
+                        [control_x, control_y],
+                        [x2, y2]
+                    ])
+                    arrow = FancyArrowPatch(
+                        path[0], path[2],
+                        connectionstyle=f"arc3,rad={side*0.25}",
+                        arrowstyle='-|>',
+                        color='gray',
+                        linewidth=1.0,
+                        alpha=0.3,
+                        zorder=1
+                    )
+                    ax.add_patch(arrow)
+                ax.text(
+                    label_x, label_y, label,
+                    color='darkred',
+                    fontsize=11,
+                    ha='center', va='center',
+                    fontweight='bold',
+                    bbox=dict(
+                        facecolor='white', edgecolor='black', alpha=0.98,
+                        boxstyle='round,pad=0.5', linewidth=1.2
+                    ),
+                    fontname='Helvetica',
+                    zorder=1000
+                )
 
-            # Use NetworkX edge label function with custom positioning
-            nx.draw_networkx_edge_labels(
-                graph, pos,
-                edge_labels=filtered_edge_labels,
-                font_size=9,
-                font_color='darkred',
-                font_weight='bold',
-                bbox=dict(
-                    boxstyle="round,pad=0.2",
-                    facecolor='white',
-                    edgecolor='gray',
-                    alpha=0.9
-                ),
-                label_pos=0.6,  # Position labels 60% along the edge
-                ax=ax
-            )
+        # Set title closer to the network
+        if custom_title:
+            ax.set_title(custom_title, fontsize=16, fontweight='bold',
+                        fontfamily='Helvetica', pad=20)  # Reduced padding
+        else:
+            ax.set_title("Consolidated Protein-Protein Interaction Network",
+                        fontsize=16, fontweight='bold',
+                        fontfamily='Helvetica', pad=20)  # Reduced padding
 
-        # Professional title and styling
-        title_text = custom_title if custom_title else "Consolidated Protein-Protein Interaction Network"
-        plt.title(
-            title_text,
-            fontsize=20, fontname='Helvetica', fontweight='bold', pad=20
-        )
-
-        # Professional legend with comprehensive interaction types
+        # Professional legend closer to the network
         if legend_handles:
             ax.legend(
                 handles=legend_handles,
                 loc='upper center',
-                bbox_to_anchor=(0.5, -0.05),
+                bbox_to_anchor=(0.5, 0.05),  # Moved closer to nodes
                 ncol=3,  # Three columns like the reference legend
                 fontsize=10,
                 frameon=True,
@@ -933,7 +1063,17 @@ class PPIPlotter:
         else:
             ax.margins(0.2)  # 20% margin for multiple nodes
 
-        # Save with high quality
+        # Save as SVG for scalable vector graphics (editable labels)
+        svg_output_file = output_file.replace('.png', '.svg')
+        plt.savefig(
+            svg_output_file,
+            format='svg',
+            bbox_inches='tight',
+            facecolor='white',
+            edgecolor='none'
+        )
+
+        # Also save as PNG for compatibility
         plt.savefig(
             output_file,
             dpi=300,
@@ -944,6 +1084,7 @@ class PPIPlotter:
         plt.close()
 
         self.logger.info(f"✅ Professional network plot saved to {output_file}")
+        self.logger.info(f"✅ SVG version saved to {svg_output_file} (editable in vector software)")
 
     def prevent_label_overlaps(self, ax, texts, nodes_pos, node_size=300):
         """
@@ -974,6 +1115,156 @@ class PPIPlotter:
             pass
         except Exception as e:
             self.logger.warning(f"Failed to adjust text positions: {e}")
+
+    def _draw_edges_to_node_edges(self, graph, pos, edges, style, node_radius, ax):
+        """
+        Draw edges that connect to the edge of circular nodes, not the center.
+        For multiple interactions to the same node, distribute connection points around the edge.
+
+        :param graph: NetworkX graph
+        :type graph: nx.Graph
+        :param pos: Node positions dictionary
+        :type pos: Dict
+        :param edges: List of edges to draw
+        :type edges: List[Tuple]
+        :param style: Edge style dictionary
+        :type style: Dict
+        :param node_radius: Radius of the nodes
+        :type node_radius: float
+        :param ax: Matplotlib axes
+        :type ax: matplotlib.axes.Axes
+        :return: None
+        :rtype: None
+        """
+        import numpy as np
+
+        # Track connection points for each node to avoid overlap
+        node_connections = {}
+
+        for u, v in edges:
+            # Get node positions
+            x1, y1 = pos[u]
+            x2, y2 = pos[v]
+
+            # Calculate direction vector from u to v
+            dx = x2 - x1
+            dy = y2 - y1
+            distance = np.sqrt(dx**2 + dy**2)
+
+            if distance == 0:
+                continue
+
+            # Normalize direction vector
+            dx_norm = dx / distance
+            dy_norm = dy / distance
+
+                        # Calculate connection points just outside the edge of each node
+            # Add a small buffer to avoid overlapping with the circle
+            buffer_distance = node_radius * 0.1  # 10% of node radius as buffer
+
+            # For node u (start point) - connect just outside the circle
+            start_x = x1 + dx_norm * (node_radius + buffer_distance)
+            start_y = y1 + dy_norm * (node_radius + buffer_distance)
+
+            # For node v (end point) - connect just outside the circle
+            end_x = x2 - dx_norm * (node_radius + buffer_distance)
+            end_y = y2 - dy_norm * (node_radius + buffer_distance)
+
+            # Check if we need to adjust connection points to avoid overlap
+            start_point = self._get_adjusted_connection_point(
+                u, (start_x, start_y), node_connections, node_radius, pos
+            )
+            end_point = self._get_adjusted_connection_point(
+                v, (end_x, end_y), node_connections, node_radius, pos
+            )
+
+            # Draw bidirectional arrows - one in each direction along the same line
+            # First arrow: from start to end
+            ax.annotate(
+                '',  # No text, just the arrow
+                xy=end_point,  # Arrow points to the end point
+                xytext=start_point,  # Arrow starts from start point
+                arrowprops=dict(
+                    arrowstyle='->',  # Arrow style
+                    color=style['color'],
+                    linestyle=style['style'],
+                    linewidth=style['width'],
+                    alpha=0.8,
+                    shrinkA=0,  # Don't shrink at start
+                    shrinkB=0,  # Don't shrink at end
+                    mutation_scale=6,  # Smaller arrow head for bidirectional
+                    mutation_aspect=2.0  # Make arrow head more pointed
+                )
+            )
+
+            # Second arrow: from end to start (bidirectional)
+            ax.annotate(
+                '',  # No text, just the arrow
+                xy=start_point,  # Arrow points to the start point
+                xytext=end_point,  # Arrow starts from end point
+                arrowprops=dict(
+                    arrowstyle='->',  # Arrow style
+                    color=style['color'],
+                    linestyle=style['style'],
+                    linewidth=style['width'],
+                    alpha=0.8,
+                    shrinkA=0,  # Don't shrink at start
+                    shrinkB=0,  # Don't shrink at end
+                    mutation_scale=6,  # Smaller arrow head for bidirectional
+                    mutation_aspect=2.0  # Make arrow head more pointed
+                )
+            )
+
+    def _get_adjusted_connection_point(self, node, base_point, node_connections, node_radius, pos):
+        """
+        Get an adjusted connection point to avoid overlap with existing connections.
+
+        :param node: Node identifier
+        :type node: str
+        :param base_point: Base connection point (x, y)
+        :type base_point: Tuple[float, float]
+        :param node_connections: Dictionary tracking existing connections per node
+        :type node_connections: Dict
+        :param node_radius: Radius of the node
+        :type node_radius: float
+        :param pos: Node positions dictionary
+        :type pos: Dict
+        :return: Adjusted connection point (x, y)
+        :rtype: Tuple[float, float]
+        """
+        import numpy as np
+
+        if node not in node_connections:
+            node_connections[node] = []
+
+        # Check if base point is too close to existing connections
+        min_distance = node_radius * 0.3  # Minimum distance between connection points
+
+        for existing_point in node_connections[node]:
+            dist = np.sqrt((base_point[0] - existing_point[0])**2 +
+                          (base_point[1] - existing_point[1])**2)
+            if dist < min_distance:
+                # Find a new angle around the node
+                angle_offset = len(node_connections[node]) * 0.5  # Rotate by 0.5 radians per connection
+
+                # Calculate angle from center to base point
+                center_x, center_y = pos[node]  # We need to get this from the pos dict
+                angle = np.arctan2(base_point[1] - center_y, base_point[0] - center_x)
+
+                # Apply offset
+                new_angle = angle + angle_offset
+
+                # Calculate new point just outside the edge
+                buffer_distance = node_radius * 0.1  # 10% of node radius as buffer
+                new_x = center_x + (node_radius + buffer_distance) * np.cos(new_angle)
+                new_y = center_y + (node_radius + buffer_distance) * np.sin(new_angle)
+
+                base_point = (new_x, new_y)
+                break
+
+        # Add this connection point to the tracking
+        node_connections[node].append(base_point)
+        return base_point
 
     def create_residue_legend(self, ax, x_pos=0.02, y_pos=0.98):
         """
@@ -1180,6 +1471,10 @@ def main():
         help='Prefix for output files (default: ppi_analysis)'
     )
     parser.add_argument(
+        '--output-dir', type=str, default='ppi_results',
+        help='Output directory name (default: ppi_results)'
+    )
+    parser.add_argument(
         '--debug', action='store_true',
         help='Enable detailed debug/progress logging'
     )
@@ -1210,20 +1505,37 @@ def main():
     )
     args = parser.parse_args()
 
-    # Create output directory
-    output_dir = Path(args.output_prefix)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Setup logger: Schrodinger logger + file handler
-    if SCHRODINGER_AVAILABLE:
-        logger = schrod_log.get_output_logger("PPIAnalysis")
+    # Setup logger first
+    if args.debug:
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger("PPIAnalysis")
     else:
         logger = logging.getLogger("PPIAnalysis")
-    log_file = output_dir / "ppi_analysis.log"
+
+    # Create output directory with organized structure
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    # Create subdirectories for organized output
+    images_dir = output_dir / "images"
+    data_dir = output_dir / "data"
+    logs_dir = output_dir / "logs"
+
+    images_dir.mkdir(exist_ok=True)
+    data_dir.mkdir(exist_ok=True)
+    logs_dir.mkdir(exist_ok=True)
+
+    # Setup file logging after creating logs directory
+    log_file = logs_dir / "ppi_analysis.log"
     file_handler = logging.FileHandler(log_file, mode='w')
     file_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
     logger.addHandler(file_handler)
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
+
+    logger.info(f"📁 Created organized output structure:")
+    logger.info(f"   📸 Images: {images_dir}")
+    logger.info(f"   📊 Data: {data_dir}")
+    logger.info(f"   📝 Logs: {logs_dir}")
 
     # Validate inputs
     if not validate_files(args.cms, args.traj, logger):
@@ -1341,7 +1653,7 @@ def main():
 
         plotter.plotNetwork(
             interactions,
-            output_file=str(output_dir / f"{args.output_prefix}_interactions_{interaction_type}.png"),
+            output_file=str(images_dir / f"{args.output_prefix}_interactions_{interaction_type}.png"),
             title=f"{interaction_type.replace('_', ' ').replace('-', ' ').title()} Interactions"
         )
     # Plot consolidated network only if number of unique pairs is within threshold
@@ -1351,14 +1663,14 @@ def main():
     if total_pairs <= MAX_CONSOLIDATED_EDGES:
         plotter.plotConsolidated(
             grouped_persistent_by_type,
-            output_file=str(output_dir / f"{args.output_prefix}_consolidated.png")
+            output_file=str(images_dir / f"{args.output_prefix}_consolidated.png")
         )
     else:
         logger.info(
             f"Too many interactions ({total_pairs}); skipping consolidated plot for clarity."
         )
     # Save persistent interaction data as JSON
-    with open(output_dir / "persistent_interactions.json", "w") as f:
+    with open(data_dir / "persistent_interactions.json", "w") as f:
         json.dump(grouped_persistent_by_type, f, indent=2)
     logger.info("\n🎉 Analysis completed successfully! All results are in: %s", output_dir)
     return
