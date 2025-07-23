@@ -86,6 +86,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+.cursorrules
 
 # Ignore environment files
 .env
@@ -101,6 +102,5 @@ desmond_md_job_pro-pro/
 !ppi_analyzer.py
 !ppi_analysis.py
 !analyze_simulation.py
-!.cursorrules
 !.gitignore
 !README.md
