@@ -20,7 +20,7 @@ Copyright Schrodinger, LLC. All rights reserved.
 
 # Standard library imports
 import argparse
-import json
+https://file+.vscode-resource.vscode-cdn.net/Users/devaraji/Desktop/professional/pyapp/protein-protein-docking/output_v2_fixed/images/test_v2_fixed_consolidated.png?version%3D1754548439644import json
 import os
 import sys
 import threading
