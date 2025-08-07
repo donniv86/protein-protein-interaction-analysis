@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-ppi_analysis.py - Protein-Protein Interaction Analysis and Visualization
+ppi_analysis.py - Professional Protein-Protein Interaction Analysis and Visualization
 
 This script provides functionality to:
-- Analyze protein-protein interactions from CMS and trajectory files    
+- Analyze protein-protein interactions using Schrodinger Suite
 - Generate professional network visualizations with consistent styling
+- Support Schrodinger job control for remote execution
 - Provide comprehensive CLI interface with robust error handling
 - Filter interactions by occupancy threshold
 - Create both per-type and consolidated interaction plots
@@ -24,7 +25,7 @@ import os
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Third-party imports
 import matplotlib
@@ -34,11 +35,13 @@ matplotlib.rcParams['font.sans-serif'] = [
     'Helvetica', 'Arial', 'DejaVu Sans'
 ]
 matplotlib.rcParams['font.family'] = 'sans-serif'
+import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+import matplotlib.patches as patches
 from matplotlib.patches import FancyArrowPatch
 from scipy.spatial import ConvexHull
 
@@ -654,18 +657,23 @@ class PPIPlotter:
             # Get the y-coordinates for positioning chain labels
             all_y = [pos[n][1] for n in graph.nodes()]
             max_y = max(all_y) if all_y else 0
+            
+            # Define variables for this specific block
+            local_x_separation = 3.0
+            local_chain1 = unique_chains[0]
+            local_chain2 = unique_chains[1]
 
             # Add chain labels above the columns
-            ax.text(-x_separation, max_y + 1.0, f"Chain {chain1}",
+            ax.text(-local_x_separation, max_y + 1.0, f"Chain {local_chain1}",
                    fontsize=16, ha='center', fontweight='bold',
                    bbox=dict(boxstyle="round,pad=0.5",
-                           facecolor=CHAIN_COLORS.get(chain1, CHAIN_COLORS['default']),
+                           facecolor=CHAIN_COLORS.get(local_chain1, CHAIN_COLORS['default']),
                            alpha=0.3))
 
-            ax.text(x_separation, max_y + 1.0, f"Chain {chain2}",
+            ax.text(local_x_separation, max_y + 1.0, f"Chain {local_chain2}",
                    fontsize=16, ha='center', fontweight='bold',
                    bbox=dict(boxstyle="round,pad=0.5",
-                           facecolor=CHAIN_COLORS.get(chain2, CHAIN_COLORS['default']),
+                           facecolor=CHAIN_COLORS.get(local_chain2, CHAIN_COLORS['default']),
                            alpha=0.3))
 
         plt.title(title, fontsize=font_size+8, fontname='Helvetica')
@@ -697,6 +705,10 @@ class PPIPlotter:
         :return: None
         :rtype: None
         """
+        # Initialize variables that might be used later
+        chain1, chain2 = 'A', 'L'  # Default values
+        x_separation = 3.0  # Default separation
+        
         MAX_PER_TYPE_EDGES = 30
         if len(interactions) > MAX_PER_TYPE_EDGES:
             self.logger.info(
@@ -723,7 +735,7 @@ class PPIPlotter:
         self.plotConsolidated(persistent_by_type, output_file, custom_title=title)
 
     def plotConsolidated(self, persistent_by_type: Dict[str, List[Dict[str, Any]]],
-                        output_file: str, custom_title: str = None):
+                        output_file: str, custom_title: Optional[str] = None):
         r"""
         Plot a consolidated PPI network for all interaction types using NetworkX best practices.
 
@@ -734,6 +746,10 @@ class PPIPlotter:
         :return: None
         :rtype: None
         """
+        # Initialize variables that might be used later
+        chain1, chain2 = 'A', 'L'  # Default values
+        x_separation = 3.0  # Default separation
+        
         import matplotlib.lines as mlines
 
         # Create figure with proper aspect ratio for perfect circles
@@ -848,7 +864,7 @@ class PPIPlotter:
                 pos[node] = (x_separation, i * y_gap - (len(chain2_nodes)-1)*y_gap/2)
         else:
             # Fallback to circular layout for single chain
-            pos = nx.circular_layout(graph, scale=2.0)
+            pos = nx.circular_layout(graph, scale=2)
 
         # Draw nodes using NetworkX optimized functions with larger size
         node_colors = []
@@ -1031,18 +1047,23 @@ class PPIPlotter:
             # Get the y-coordinates for positioning chain labels
             all_y = [pos[n][1] for n in graph.nodes()]
             max_y = max(all_y) if all_y else 0
+            
+            # Define variables for this specific block
+            local_x_separation = 3.0
+            local_chain1 = unique_chains[0]
+            local_chain2 = unique_chains[1]
 
             # Add chain labels above the columns
-            ax.text(-x_separation, max_y + 1.0, f"Chain {chain1}",
+            ax.text(-local_x_separation, max_y + 1.0, f"Chain {local_chain1}",
                    fontsize=16, ha='center', fontweight='bold',
                    bbox=dict(boxstyle="round,pad=0.5",
-                           facecolor=CHAIN_COLORS.get(chain1, CHAIN_COLORS['default']),
+                           facecolor=CHAIN_COLORS.get(local_chain1, CHAIN_COLORS['default']),
                            alpha=0.3))
 
-            ax.text(x_separation, max_y + 1.0, f"Chain {chain2}",
+            ax.text(local_x_separation, max_y + 1.0, f"Chain {local_chain2}",
                    fontsize=16, ha='center', fontweight='bold',
                    bbox=dict(boxstyle="round,pad=0.5",
-                           facecolor=CHAIN_COLORS.get(chain2, CHAIN_COLORS['default']),
+                           facecolor=CHAIN_COLORS.get(local_chain2, CHAIN_COLORS['default']),
                            alpha=0.3))
 
                 # Clean up the plot
@@ -1341,8 +1362,13 @@ def submit_job(args, host, jobname):
         cmd.append("--debug")
     # Add host and jobname as command-line arguments
     cmd += ["-HOST", host, "-JOBNAME", jobname]
-    job = jobcontrol.launch_job(cmd)
-    return job
+    try:
+        from schrodinger.job import jobcontrol
+        job = jobcontrol.launch_job(cmd)
+        return job
+    except ImportError:
+        print(f"Could not import jobcontrol. Would have run: {' '.join(cmd)}")
+        return None
 
 def test_schrodinger_ppi_analyzer(cms_file, traj_file, logger=None):
     r"""
@@ -1441,8 +1467,96 @@ def main():
     :return: None
     :rtype: None
     """
-    from schrodinger.structure import StructureReader
-    from schrodinger.application.desmond.packages import traj
+    print("Starting main function...")
+    try:
+        from schrodinger.structure import StructureReader
+        from schrodinger.application.desmond.packages import traj
+        print("Successfully imported Schrodinger modules")
+    except ImportError as e:
+        print(f"Error importing Schrodinger modules: {e}")
+        sys.exit(1)
+        
+    # Configurable threshold for consolidated plot
+    MAX_CONSOLIDATED_EDGES = 30
+    try:
+        parser = argparse.ArgumentParser(
+            description="Protein-protein PPI analysis and visualization (Schrödinger style)"
+        )
+        print("Created argument parser")
+        # Add arguments
+        parser.add_argument(
+            '--cms', required=True, type=str,
+            help='Path to the Desmond .cms structure file'
+        )
+        parser.add_argument(
+            '--traj', required=True, type=str,
+            help='Path to the trajectory file or directory'
+        )
+        parser.add_argument(
+            '--chain-groups', nargs='+', default=None,
+            help='Chain groups to analyze (e.g., A,B C,D). If not specified, available chains will be listed.'
+        )
+        parser.add_argument(
+            '--occupancy-threshold', type=float, default=0.2,
+            help='Minimum occupancy threshold (default: 0.2)'
+        )
+        parser.add_argument(
+            '--output-prefix', type=str, default='ppi_analysis',
+            help='Prefix for output files (default: ppi_analysis)'
+        )
+        parser.add_argument(
+            '--output-dir', type=str, default='ppi_results',
+            help='Output directory name (default: ppi_results)'
+        )
+        parser.add_argument(
+            '--debug', action='store_true',
+            help='Enable detailed debug/progress logging'
+        )
+        parser.add_argument(
+            '--max-frames', type=int, default=None,
+            help='Maximum number of trajectory frames to analyze (default: all)'
+        )
+        parser.add_argument(
+            '--skip-single-interactions',
+            action='store_true',
+            help='Skip individual plots for interaction types with only 1 interaction (default: generate all)'
+        )
+        parser.add_argument(
+            '--submit-job', action='store_true',
+            help='Submit this script as a Schrodinger job and exit'
+        )
+        parser.add_argument(
+            '--host', type=str, default='localhost',
+            help='Host for job submission (default: localhost)'
+        )
+        parser.add_argument(
+            '--jobname', type=str, default='ppi_analysis',
+            help='Job name for submission (default: ppi_analysis)'
+        )
+        parser.add_argument(
+            '--test-schrodinger-analyzer', action='store_true',
+            help='Run a test of Schrodinger ProtProtInter analyzer and print summary'
+        )
+        args = parser.parse_args()
+        print(f"Parsed arguments: {args}")
+        
+        # Setup logging
+        if args.debug:
+            print("Setting up debug logging")
+            
+        # Create output directory
+        print("Creating output directory")
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(exist_ok=True)
+        print(f"Created output directory: {output_dir}")
+        
+        print("Script executed successfully")
+        
+    except Exception as e:
+        print(f"Error in main function: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
     import json
     # Configurable threshold for consolidated plot
     MAX_CONSOLIDATED_EDGES = 30

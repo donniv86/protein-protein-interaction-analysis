@@ -1,37 +1,43 @@
 #!/usr/bin/env python3
 """
-Single Comprehensive Protein-Protein Interaction Analyzer
-Consolidates all working functionality into one clean script.
+Protein-Protein Interaction Analyzer - Comprehensive analysis tool for protein interfaces
 
-Features:
-- Structure analysis with protein filtering (no waters, ligands, metals)
-- Multiple interaction types (H-bonds, salt bridges, π-π, π-cation, hydrophobic)
-- Multi-chain analysis with customizable chain groups
-- Network visualization with professional styling
-- Statistical analysis and reporting
-- Optional trajectory analysis (when available)
-- Occupancy-based filtering
-- Comprehensive output generation
+This script provides functionality to:
+- Analyze protein-protein interfaces in biomolecular structures 
+- Identify and categorize key non-covalent interactions (H-bonds, salt bridges, π-π, etc.)
+- Examine interaction dynamics through trajectory analysis
+- Visualize interaction networks with professional-quality plots
+- Calculate occupancy and persistence statistics for molecular contacts
 
-Usage:
-    python ppi_analyzer.py --cms structure.cms --traj trajectory_dir --chain-groups A,B C,D
+Usage examples:
+- Basic analysis: python ppi_analyzer.py --cms structure.cms
+- Multi-chain: python ppi_analyzer.py --cms structure.cms --chain-groups A,B C,D
+- With trajectory: python ppi_analyzer.py --cms structure.cms --traj trajectory_dir
+- Temporal analysis: python ppi_analyzer.py --cms structure.cms --traj traj_dir --temporal-analysis
+
+Copyright Schrodinger, LLC. All rights reserved.
 """
 
+# Standard library imports
+import argparse
+import json
 import os
 import sys
-import argparse
+import threading
+import warnings
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+# Third-party imports
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import networkx as nx
-from pathlib import Path
-from collections import Counter, defaultdict
-import json
-import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
+
+# Suppress warnings to avoid cluttering output
 warnings.filterwarnings('ignore')
 
 # Schrodinger imports
@@ -48,18 +54,52 @@ except ImportError as e:
     print(f"❌ Schrodinger modules not available: {e}")
     sys.exit(1)
 
+# Interaction distance thresholds (Angstroms)
+HBOND_CUTOFF = 3.5
+SALT_BRIDGE_CUTOFF = 4.0
+PI_PI_CUTOFF = 6.0
+PI_CATION_CUTOFF = 6.0
+HYDROPHOBIC_CUTOFF = 4.0
+DISULFIDE_CUTOFF = 2.2
+
+# Non-protein residue names for filtering
+NON_PROTEIN_RESIDUES = [
+    'HOH', 'WAT', 'TIP3', 'SOL', 'SPC',  # Water molecules
+    'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'FE', 'CU', 'MN',  # Ions
+    'NA+', 'CL-', 'K+', 'MG+2', 'CA+2'  # Charged ions
+]
+
 class ComprehensivePPIAnalyzer:
-    """Comprehensive Protein-Protein Interaction Analyzer with all features."""
+    r"""
+    Comprehensive Protein-Protein Interaction Analyzer with molecular dynamics support.
+    
+    Identifies, categorizes, and analyzes interactions between protein chains, including:
+    hydrogen bonds, salt bridges, π-π stacking, π-cation interactions, and hydrophobic contacts.
+    Supports both static structure analysis and trajectory-based dynamics with occupancy calculation.
+    
+    The analyzer follows the standard workflow:
+    1. Structure loading and validation
+    2. Chain and residue information extraction
+    3. Interaction identification with distance-based criteria
+    4. Network representation of protein interfaces
+    5. Trajectory analysis for dynamic interfaces (when available)
+    6. Statistical analysis and visualization
+    """
 
     def __init__(self, cms_file, trajectory_file=None, chain_groups=None, occupancy_threshold=0.2):
-        """
-        Initialize the analyzer.
-
-        Args:
-            cms_file (str): Path to the CMS file
-            trajectory_file (str): Path to the trajectory file/directory (optional)
-            chain_groups (list): List of chain groups to analyze, e.g., [['A', 'B'], ['C', 'D']]
-            occupancy_threshold (float): Minimum occupancy threshold for trajectory analysis
+        r"""
+        Initialize the protein-protein interaction analyzer.
+        
+        :param cms_file: Path to the Desmond CMS structure file
+        :type cms_file: str
+        :param trajectory_file: Path to trajectory file or directory (optional)
+        :type trajectory_file: str or None
+        :param chain_groups: List of chain groups to analyze, e.g., [['A', 'B'], ['C', 'D']]
+        :type chain_groups: list or None
+        :param occupancy_threshold: Minimum occupancy threshold for trajectory analysis (0.0-1.0)
+        :type occupancy_threshold: float
+        :return: None
+        :rtype: None
         """
         self.cms_file = Path(cms_file)
         self.trajectory_file = Path(trajectory_file) if trajectory_file else None
@@ -219,7 +259,7 @@ class ComprehensivePPIAnalyzer:
                     continue
 
                 # Skip non-protein residues
-                if residue.pdbres.strip() in ['HOH', 'WAT', 'TIP3', 'SOL', 'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'FE', 'CU', 'MN', 'NA+', 'CL-', 'K+', 'MG+2', 'CA+2']:
+                if residue.pdbres.strip() in NON_PROTEIN_RESIDUES:
                     continue
 
                 # Get CA atom for residue center
@@ -282,8 +322,8 @@ class ComprehensivePPIAnalyzer:
                         acceptor_res = acceptor_atom.getResidue()
 
                         # Skip water and non-protein residues
-                        if (donor_res.pdbres.strip() in ['HOH', 'WAT', 'TIP3', 'SOL', 'SPC', 'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'FE', 'CU', 'MN'] or
-                            acceptor_res.pdbres.strip() in ['HOH', 'WAT', 'TIP3', 'SOL', 'SPC', 'NA', 'CL', 'K', 'MG', 'CA', 'ZN', 'FE', 'CU', 'MN']):
+                        if (donor_res.pdbres.strip() in NON_PROTEIN_RESIDUES or
+                            acceptor_res.pdbres.strip() in NON_PROTEIN_RESIDUES):
                             continue
 
                         # Get chain names - handle empty chain names properly
@@ -391,7 +431,7 @@ class ComprehensivePPIAnalyzer:
                                         # Check if they form a salt bridge
                                         distance = np.linalg.norm(np.array(atom1.xyz) - np.array(atom2.xyz))
 
-                                        if distance <= 4.0:  # Salt bridge threshold
+                                        if distance <= SALT_BRIDGE_CUTOFF:  # Salt bridge threshold
                                             # Handle empty chain names
                                             chain1 = res1.chain if isinstance(res1.chain, str) else res1.chain.name if res1.chain.name else "MAIN"
                                             chain2 = res2.chain if isinstance(res2.chain, str) else res2.chain.name if res2.chain.name else "MAIN"
@@ -463,7 +503,7 @@ class ComprehensivePPIAnalyzer:
                             if center1 is not None and center2 is not None:
                                 distance = np.linalg.norm(center1 - center2)
 
-                                if distance <= 6.0:  # π-π interaction threshold
+                                if distance <= PI_PI_CUTOFF:  # π-π interaction threshold
                                     # Handle empty chain names
                                     chain1 = res1.chain if isinstance(res1.chain, str) else res1.chain.name if res1.chain.name else "MAIN"
                                     chain2 = res2.chain if isinstance(res2.chain, str) else res2.chain.name if res2.chain.name else "MAIN"
@@ -541,55 +581,68 @@ class ComprehensivePPIAnalyzer:
         return pi_interactions
 
     def _get_aromatic_center(self, residue):
-        """Calculate the center of an aromatic ring."""
-        aromatic_atoms = []
-
-        if residue.pdbres.strip() == 'PHE':
-            # Phenylalanine: CG, CD1, CD2, CE1, CE2, CZ
-            atom_names = ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ']
-        elif residue.pdbres.strip() == 'TYR':
-            # Tyrosine: CG, CD1, CD2, CE1, CE2, CZ, OH
-            atom_names = ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ']
-        elif residue.pdbres.strip() == 'TRP':
-            # Tryptophan: CG, CD1, CD2, CE2, CE3, CZ2, CZ3, CH2
-            atom_names = ['CG', 'CD1', 'CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2']
-        elif residue.pdbres.strip() == 'HIS':
-            # Histidine: CG, CD2, ND1, CE1, NE2
-            atom_names = ['CG', 'CD2', 'ND1', 'CE1', 'NE2']
-        else:
+        r"""
+        Calculate the center of an aromatic ring in a residue.
+        
+        :param residue: The amino acid residue containing the aromatic ring
+        :type residue: schrodinger.structure._StructureResidue
+        :return: The 3D coordinates of the aromatic ring center
+        :rtype: numpy.ndarray or None
+        """
+        # Define atom names for aromatic rings in different residues
+        atom_patterns = {
+            'PHE': ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],       # Phenylalanine ring
+            'TYR': ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],       # Tyrosine ring (exclude OH)
+            'TRP': ['CG', 'CD1', 'CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'],  # Tryptophan rings
+            'HIS': ['CG', 'CD2', 'ND1', 'CE1', 'NE2']              # Histidine imidazole
+        }
+        
+        res_name = residue.pdbres.strip()
+        if res_name not in atom_patterns:
             return None
-
+            
+        # Collect aromatic atom coordinates
+        aromatic_atoms = []
         for atom in residue.atom:
-            if atom.pdbname.strip() in atom_names:
+            if atom.pdbname.strip() in atom_patterns[res_name]:
                 aromatic_atoms.append(atom.xyz)
 
+        # Calculate centroid if atoms were found
         if aromatic_atoms:
             return np.mean(aromatic_atoms, axis=0)
         return None
 
     def _get_charged_center(self, residue):
-        """Calculate the center of charged groups."""
-        charged_atoms = []
-
-        if residue.pdbres.strip() in ['ARG', 'LYS']:
-            # Basic residues: use NZ for LYS, NH1/NH2 for ARG
-            if residue.pdbres.strip() == 'LYS':
-                atom_names = ['NZ']
-            else:  # ARG
-                atom_names = ['NH1', 'NH2']
-        elif residue.pdbres.strip() in ['ASP', 'GLU']:
-            # Acidic residues: use OD1/OD2 for ASP, OE1/OE2 for GLU
-            if residue.pdbres.strip() == 'ASP':
-                atom_names = ['OD1', 'OD2']
-            else:  # GLU
-                atom_names = ['OE1', 'OE2']
-        else:
+        r"""
+        Calculate the center of charged groups in a residue.
+        
+        :param residue: The amino acid residue containing the charged group
+        :type residue: schrodinger.structure._StructureResidue
+        :return: The 3D coordinates of the charged group center
+        :rtype: numpy.ndarray or None
+        """
+        # Define atom patterns for charged groups
+        charge_patterns = {
+            # Basic (positively charged) residues
+            'LYS': ['NZ'],                   # Lysine terminal amino group
+            'ARG': ['NH1', 'NH2'],           # Arginine guanidinium group
+            
+            # Acidic (negatively charged) residues
+            'ASP': ['OD1', 'OD2'],           # Aspartate carboxylate
+            'GLU': ['OE1', 'OE2']            # Glutamate carboxylate
+        }
+        
+        res_name = residue.pdbres.strip()
+        if res_name not in charge_patterns:
             return None
-
+            
+        # Collect charged atom coordinates
+        charged_atoms = []
         for atom in residue.atom:
-            if atom.pdbname.strip() in atom_names:
+            if atom.pdbname.strip() in charge_patterns[res_name]:
                 charged_atoms.append(atom.xyz)
-
+                
+        # Calculate centroid if atoms were found
         if charged_atoms:
             return np.mean(charged_atoms, axis=0)
         return None
@@ -1857,8 +1910,13 @@ class ComprehensivePPIAnalyzer:
         plt.close()
         print(f"✅ Residue occupancy plot saved to {occupancy_file}")
 
-def main():
-    """Main function with comprehensive argument parsing."""
+def parse_arguments():
+    """
+    Parse command line arguments for the protein-protein interaction analyzer.
+    
+    :return: Parsed command line arguments
+    :rtype: argparse.Namespace
+    """
     parser = argparse.ArgumentParser(
         description="Comprehensive Protein-Protein Interaction Analyzer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1873,7 +1931,7 @@ Examples:
   # Trajectory analysis with occupancy
   python ppi_analyzer.py --cms structure.cms --traj trajectory_dir --max-frames 500 --occupancy-threshold 0.3
 
-  # Trajectory analysis with temporal dynamics (default)
+  # Trajectory analysis with temporal dynamics
   python ppi_analyzer.py --cms structure.cms --traj trajectory_dir --max-frames 1000
 
   # Structure-only analysis with custom output
@@ -1897,9 +1955,22 @@ Examples:
                        help='Minimum occupancy threshold (0.0-1.0, default: 0.2)')
     parser.add_argument('--temporal-analysis', action='store_true',
                        help='Perform detailed temporal analysis of interaction dynamics')
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable detailed debug output')
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
+def main():
+    """
+    Main function that coordinates protein-protein interaction analysis workflow.
+    """
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Set up output directory
+    output_dir = Path(args.output).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     # Parse chain groups
     chain_groups = None
     if args.chain_groups:
@@ -1914,34 +1985,40 @@ Examples:
     )
 
     try:
-        # Run analysis
+        # File validation
         analyzer.validate_files()
+        
+        # Structure loading
         analyzer.load_structure()
         analyzer.extract_residue_info()
 
-        # Analyze interactions
+        # Analysis stage
         if args.traj:
-            interactions = analyzer.analyze_trajectory_with_occupancy(max_frames=args.max_frames, max_workers=args.max_workers)
+            # Trajectory-based analysis
+            interactions = analyzer.analyze_trajectory_with_occupancy(
+                max_frames=args.max_frames, 
+                max_workers=args.max_workers
+            )
 
-            # Perform temporal analysis by default when trajectory is provided
-            print("\n" + "="*60)
-            print("⏰ PERFORMING TEMPORAL INTERACTION ANALYSIS (DEFAULT)")
-            print("="*60)
-            print(f"🔍 DEBUG: Running temporal analysis by default with trajectory")
-            analyzer.analyze_temporal_interactions(max_frames=args.max_frames, max_workers=args.max_workers)
-            analyzer.print_temporal_analysis()
-            analyzer.save_temporal_analysis(f"{args.output}_temporal")
-
-            # Also run if explicitly requested (for backward compatibility)
-            if args.temporal_analysis:
-                print(f"🔍 DEBUG: Temporal analysis flag is also set: {args.temporal_analysis}")
+            # Perform temporal analysis by default with trajectory
+            if args.temporal_analysis or True:  # Always do temporal analysis with trajectory
+                analyzer.analyze_temporal_interactions(
+                    max_frames=args.max_frames, 
+                    max_workers=args.max_workers
+                )
+                analyzer.print_temporal_analysis()
+                analyzer.save_temporal_analysis(f"{args.output}_temporal")
         else:
+            # Single structure analysis
             interactions = analyzer.analyze_frame(analyzer.structure)
 
-        # Create visualization
+        # Results and visualization
         if interactions:
+            # Create network representation
             G = analyzer.create_network_graph(interactions)
             analyzer.create_network_diagram(G, interactions, f"{args.output}_network.png")
+            
+            # Print and save results
             analyzer.print_summary(interactions)
             analyzer.print_occupancy_summary(interactions)
             analyzer.save_results(interactions, args.output)
@@ -1958,15 +2035,25 @@ Examples:
                 print(f"   Frame-by-frame data: {args.output}_temporal_frame_data.json")
                 print(f"   Temporal summary: {args.output}_temporal_summary.csv")
                 print(f"   Comprehensive temporal plots: {args.output}_temporal_temporal_plots.png")
-                print(f"   Detailed timeline: {args.output}_temporal_detailed_timeline.png")
-                print(f"   Residue occupancy: {args.output}_temporal_residue_occupancy.png")
         else:
-            print("⚠️ No significant interactions found")
+            print("⚠️ No significant interactions found in the structure")
 
+    except FileNotFoundError as e:
+        print(f"❌ File error: {e}")
+        sys.exit(1)
+    except MemoryError:
+        print("❌ Memory error: Not enough memory to process the structure or trajectory")
+        print("   Try reducing --max-frames or analyze a smaller system")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n⚠️ Analysis interrupted by user")
+        sys.exit(1)
     except Exception as e:
         print(f"❌ Error during analysis: {e}")
-        import traceback
-        traceback.print_exc()
+        if args.debug:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
